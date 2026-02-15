@@ -1,0 +1,49 @@
+# ============ Home Directory (DO NOT TRACK) ============ #
+.bash*
+.ssh/
+.profile
+.local/
+.cache/
+.config/
+.vscode-server/
+
+# ============ Python ============ #
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+*.egg-info/
+.venv/
+venv/
+.python-version
+uv.lock
+
+# ============ Data & Model Weights (too large for git) ============ #
+# Download from HuggingFace instead
+*/data/CAD*/
+*/data/PEMS*/
+*/data/METR_LA/
+*/data/NYC_*/
+*/data/CHI_TAXI/
+*/data/CD_DIDI/
+*/data/SZ_DIDI/
+*/data/Traffic*/
+*/data/OpenCity/
+*/data/*.h5
+*/data/*.npy
+*/data/*.csv
+*/model_weights/OpenCity/*.pth
+
+# ============ IDE & OS ============ #
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+
+# ============ Logs ============ #
+*.log
+wandb/
+runs/
