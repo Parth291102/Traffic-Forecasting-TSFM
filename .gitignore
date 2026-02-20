@@ -7,6 +7,9 @@
 .config/
 .vscode-server/
 
+# ============ Virtual Env Binaries ============ #
+bin/
+
 # ============ Python ============ #
 __pycache__/
 *.py[cod]
