@@ -91,6 +91,8 @@ When demo and query share similar temporal slots (same time of day, similar day 
 
 | File | Change Type | Description |
 |------|-------------|-------------|
+| `conf/general_conf/dataset_splits.conf` | **New file** | Per-dataset split ratios (centralized, all modes) |
+| `lib/data_process.py` | **Modify** | `define_dataloder()` uses `dataset_splits.conf` for per-dataset splits |
 | `lib/ict_data_process.py` | **New file** | ICT-aware dataset and dataloader |
 | `model/OpenCity/OpenCity.py` | **Add method** | `forward_ict()` — new forward pass with demo processing |
 | `model/Model.py` | **Modify** | Transparent demo parameter forwarding |
@@ -114,7 +116,8 @@ class ICTTrafficDataset(Dataset):
     """Traffic dataset with demonstration sampling for ICT."""
 
     def __init__(self, data, batch_size, input_window, output_window,
-                 demo_pool, num_demonstrations=1, eval_only=False):
+                 demo_pool, num_demonstrations=1, num_prefix_selections=1,
+                 eval_only=False):
         """
         Args:
             data: numpy array [T, N, F] for this split (train/val/test)
@@ -123,6 +126,8 @@ class ICTTrafficDataset(Dataset):
             output_window: prediction window length
             demo_pool: list of (x, y) numpy array pairs from training split
             num_demonstrations: K — number of demos per query
+            num_prefix_selections: S — number of independent demo sets to sample
+                                   (for variance reduction at test time)
             eval_only: if True, don't shuffle
         """
         # Create sliding windows (same as TrafficDataset)
@@ -132,6 +137,7 @@ class ICTTrafficDataset(Dataset):
         ]
         self.demo_pool = demo_pool  # From training split
         self.num_demonstrations = num_demonstrations
+        self.num_prefix_selections = num_prefix_selections
 
         # Shuffle + drop last + pre-batch (same as TrafficDataset)
         if not eval_only:
@@ -150,19 +156,24 @@ class ICTTrafficDataset(Dataset):
         batch_x = torch.from_numpy(np.stack(batch_x)).float()  # [B, T, N, F]
         batch_y = torch.from_numpy(np.stack(batch_y)).float()  # [B, T, N, F]
 
-        # Sample K demonstrations for each query in the batch
+        # Sample S independent sets of K demonstrations for each query
         B = batch_x.shape[0]
         K = self.num_demonstrations
+        S = self.num_prefix_selections
         demos_x_list, demos_y_list = [], []
         for b in range(B):
-            indices = random.sample(range(len(self.demo_pool)), K)
-            dx = np.stack([self.demo_pool[i][0] for i in indices])  # [K, T, N, F]
-            dy = np.stack([self.demo_pool[i][1] for i in indices])  # [K, T, N, F]
-            demos_x_list.append(dx)
-            demos_y_list.append(dy)
+            sets_x, sets_y = [], []
+            for s in range(S):
+                indices = random.sample(range(len(self.demo_pool)), K)
+                dx = np.stack([self.demo_pool[i][0] for i in indices])  # [K, T, N, F]
+                dy = np.stack([self.demo_pool[i][1] for i in indices])  # [K, T, N, F]
+                sets_x.append(dx)
+                sets_y.append(dy)
+            demos_x_list.append(np.stack(sets_x))  # [S, K, T, N, F]
+            demos_y_list.append(np.stack(sets_y))  # [S, K, T, N, F]
 
-        demos_x = torch.from_numpy(np.stack(demos_x_list)).float()  # [B, K, T, N, F]
-        demos_y = torch.from_numpy(np.stack(demos_y_list)).float()  # [B, K, T, N, F]
+        demos_x = torch.from_numpy(np.stack(demos_x_list)).float()  # [B, S, K, T, N, F]
+        demos_y = torch.from_numpy(np.stack(demos_y_list)).float()  # [B, S, K, T, N, F]
 
         return batch_x, batch_y, demos_x, demos_y
 
@@ -170,23 +181,64 @@ class ICTTrafficDataset(Dataset):
         return len(self.batches)
 ```
 
+> **Design note — `num_prefix_selections` (S)**:  When S=1, `demos_x` shape is `[B, 1, K, T, N, F]` — the S dimension is always present.  In `test_ict`, the loop iterates over S, each time passing `demos_x[:, s]` (shape `[B, K, T, N, F]`) to `forward_ict`.  Since the model is in `eval()` mode with no dropout, each selection *must* use **different demo indices** for the averaging to be meaningful.  The sampling happens in `__getitem__` at data loading time, guaranteeing truly independent demo sets.
+
 ##### 1.2 `define_ict_dataloader` Function
 
 ```python
+import configparser
+
+
+def load_dataset_splits(conf_path='../conf/general_conf/dataset_splits.conf'):
+    """Load per-dataset split ratios from conf file.
+
+    Returns:
+        splits: dict  {dataset_name: (val_ratio, test_ratio)}
+        default: tuple (val_ratio, test_ratio) from [default] section
+    """
+    config = configparser.ConfigParser()
+    config.read(conf_path)
+    default_val = config.getfloat('default', 'val_ratio')
+    default_test = config.getfloat('default', 'test_ratio')
+    splits = {}
+    for section in config.sections():
+        if section == 'default':
+            continue
+        splits[section] = (
+            config.getfloat(section, 'val_ratio'),
+            config.getfloat(section, 'test_ratio'),
+        )
+    return splits, (default_val, default_test)
+
+
+def get_dataset_split(dataset_name, splits, default):
+    """Resolve per-dataset split ratios.
+
+    Args:
+        dataset_name: str
+        splits: dict from load_dataset_splits()
+        default: (val_ratio, test_ratio) fallback
+    """
+    return splits.get(dataset_name, default)
+
+
 def define_ict_dataloader(args):
     """Create ICT-aware dataloaders.
 
-    Key difference from define_dataloder:
+    Key differences from define_dataloder:
+    - Per-dataset split ratios loaded from conf/general_conf/dataset_splits.conf
     - Constructs a demo_pool from training split
     - Val/test datasets use training split's demo_pool (no data leakage)
     - Returns dataloaders that yield (query_x, query_y, demos_x, demos_y)
     """
+    splits, default_split = load_dataset_splits()
     scaler_dict = {}
     datasets_train, datasets_val, datasets_test = [], [], []
 
     for dataset_name in args.dataset_use:
         data = load_st_dataset(dataset_name, args)
-        data_train, data_val, data_test = split_data_by_ratio(data, args.val_ratio, args.test_ratio)
+        val_ratio, test_ratio = get_dataset_split(dataset_name, splits, default_split)
+        data_train, data_val, data_test = split_data_by_ratio(data, val_ratio, test_ratio)
 
         # Normalize using training split statistics
         scaler, _, _ = normalize_dataset(data_train, args.input_base_dim)
@@ -204,13 +256,17 @@ def define_ict_dataloader(args):
             for i in range(len(data_train) - iw - ow + 1)
         ]
 
-        # Create datasets
+        # Create datasets (S=1 for train/val, S=num_prefix_selections for test)
         train_ds = ICTTrafficDataset(data_train, args.batch_size, iw, ow,
-                                      demo_pool, args.num_demonstrations, eval_only=False)
+                                      demo_pool, args.num_demonstrations,
+                                      num_prefix_selections=1, eval_only=False)
         val_ds = ICTTrafficDataset(data_val, args.batch_size, iw, ow,
-                                    demo_pool, args.num_demonstrations, eval_only=True)
+                                    demo_pool, args.num_demonstrations,
+                                    num_prefix_selections=1, eval_only=True)
         test_ds = ICTTrafficDataset(data_test, args.batch_size, iw, ow,
-                                     demo_pool, args.num_demonstrations, eval_only=True)
+                                     demo_pool, args.num_demonstrations,
+                                     num_prefix_selections=args.num_prefix_selections,
+                                     eval_only=True)
         datasets_train.append(train_ds)
         datasets_val.append(val_ds)
         datasets_test.append(test_ds)
@@ -246,6 +302,8 @@ def forward_ict(self, input, lbls, demos_x, demos_y, select_dataset):
     """
     bs, time_steps, num_nodes, num_feas = input.size()
     K = demos_x.shape[1]
+    assert demos_x.dim() == 5, f"demos_x must be [B, K, T, N, F], got {demos_x.shape}"
+    assert demos_x.shape[0] == bs, f"demo batch size mismatch: {demos_x.shape[0]} vs {bs}"
 
     # ===== QUERY PROCESSING (same as forward) =====
 
@@ -280,7 +338,7 @@ def forward_ict(self, input, lbls, demos_x, demos_y, select_dataset):
 
     all_demo_enc = []      # List of [B, 48, N, D] — one per demo
     all_demo_TH = []       # temporal keys for each demo
-    all_demo_TP = []       # temporal queries (unused, but needed for TH_all construction)
+    all_demo_TP = []       # cached dk_TP to avoid recomputation
 
     for k in range(K):
         dk_x = demos_x[:, k]  # [B, T, N, F]
@@ -316,11 +374,13 @@ def forward_ict(self, input, lbls, demos_x, demos_y, select_dataset):
 
         all_demo_enc.append(dk_enc)
         all_demo_TH.append(dk_th_full)
+        all_demo_TP.append(dk_TP)  # Cache dk_TP for TP_all construction
 
     # ===== CONCATENATE: demos + query =====
 
     # Encoder input: [demo1(48)] [demo2(48)] ... [demoK(48)] [query(24)]
     enc_all = torch.cat(all_demo_enc + [query_enc], dim=1)   # [B, K*48+24, N, D]
+    assert enc_all.shape[1] == K * 48 + 24, f"enc_all T-dim: expected {K*48+24}, got {enc_all.shape[1]}"
 
     # TH for all positions (used as KEY in TC attention)
     TH_all = torch.cat(all_demo_TH + [query_TH], dim=1)      # [B, K*48+24, N, D]
@@ -328,15 +388,11 @@ def forward_ict(self, input, lbls, demos_x, demos_y, select_dataset):
     # TP for all positions (used as QUERY in TC attention)
     # Demo positions: use their own TP (repeated for hist+future patches)
     # Query positions: use query_TP
-    all_demo_TP_full = []
-    for k in range(K):
-        dk_x = demos_x[:, k]
-        dk_y = demos_y[:, k]
-        dk_TCH = dk_x[..., self.output_dim:].long()
-        dk_TCP = dk_y[..., self.output_dim:].long()
-        _, dk_TP = self.patch_embedding_time(torch.cat([dk_TCH, dk_TCP], dim=-1))
-        dk_TP = dk_TP + spa_feas
-        all_demo_TP_full.append(torch.cat([dk_TP, dk_TP], dim=1))  # [B, 48, N, D]
+    # Reuse cached dk_TP from the loop above (no redundant recomputation)
+    all_demo_TP_full = [
+        torch.cat([dk_TP, dk_TP], dim=1)  # [B, 48, N, D]
+        for dk_TP in all_demo_TP
+    ]
     TP_all = torch.cat(all_demo_TP_full + [query_TP], dim=1)  # [B, K*48+24, N, D]
 
     # ===== ENCODER BLOCKS =====
@@ -354,6 +410,7 @@ def forward_ict(self, input, lbls, demos_x, demos_y, select_dataset):
     # ===== EXTRACT QUERY PATCHES & PREDICT =====
 
     query_out = enc_all[:, -24:, :, :]  # Last 24 patches = query
+    assert query_out.shape[1] == 24, f"query_out T-dim: expected 24, got {query_out.shape[1]}"
     # [B, 24, N, D]
 
     skip = query_out.permute(0, 2, 3, 1).contiguous()  # [B, N, D, 24]
@@ -375,7 +432,7 @@ def forward_ict(self, input, lbls, demos_x, demos_y, select_dataset):
 - Demo temporal features: history uses `dk_TH`, future uses `dk_TP`. This tells the attention mechanism **when** each demo patch's data comes from.
 - No new parameters are introduced. All embeddings, attention layers, GCN, FFN, and the prediction head are from the pretrained model.
 
-**Optimization Note — TP computation**: The demo TP is computed twice (once for `all_demo_TH` construction and once for `TP_all`). This can be optimized by caching. Implementation should store dk_TP in the first loop.
+**Optimization — TP caching**: The demo `dk_TP` is now cached in `all_demo_TP` during the first loop and reused for `TP_all` construction. No redundant `patch_embedding_time` calls.
 
 ---
 
@@ -432,27 +489,23 @@ def test_ict(model, args, scaler_dict, test_dataloader, logger, path=None,
         total_count, total_mape_count, total_batch = 0, 0, 0
 
         for inputs, targets, demos_x, demos_y in test_dataloader:
-            inputs = inputs.squeeze(0).to(args.device)
-            targets = targets.squeeze(0).to(args.device)
-            demos_x = demos_x.squeeze(0).to(args.device)  # [B, K, T, N, F]
-            demos_y = demos_y.squeeze(0).to(args.device)
+            inputs = inputs.squeeze(0).to(args.device)     # [B, T, N, F]
+            targets = targets.squeeze(0).to(args.device)   # [B, T, N, F]
+            demos_x = demos_x.squeeze(0).to(args.device)   # [B, S, K, T, N, F]
+            demos_y = demos_y.squeeze(0).to(args.device)   # [B, S, K, T, N, F]
 
             select_dataset = get_key_from_value(args.num_nodes_dict, inputs.shape[2])
+            S = demos_x.shape[1]  # num_prefix_selections
 
-            if num_prefix_selections > 1:
-                # Multiple random demo selections, average predictions
-                outputs = []
-                for _ in range(num_prefix_selections):
-                    # Re-sample demos (shuffle the demo pool dimension)
-                    # Note: for proper multi-selection, the dataloader should
-                    # provide a larger demo pool, or we re-index here
-                    output = model(inputs, targets, select_dataset,
-                                   demos_x=demos_x, demos_y=demos_y)
-                    outputs.append(output)
-                output = torch.stack(outputs).mean(dim=0)
-            else:
-                output = model(inputs, targets, select_dataset,
-                               demos_x=demos_x, demos_y=demos_y)
+            # Average predictions over S independent demo sets
+            # Each set uses *different* randomly sampled demos (sampled in dataloader)
+            outputs = []
+            for s in range(S):
+                output_s = model(inputs, targets, select_dataset,
+                                 demos_x=demos_x[:, s],    # [B, K, T, N, F]
+                                 demos_y=demos_y[:, s])    # [B, K, T, N, F]
+                outputs.append(output_s)
+            output = torch.stack(outputs).mean(dim=0)      # [B, T, N, 1]
 
             # Inverse transform if needed
             if args.real_value == False:
@@ -517,9 +570,115 @@ elif args.mode == 'ict':
 
 ---
 
-#### Step 6: Configuration (`conf/ICT/ICT.conf` + `lib/Params_pretrain.py`)
+#### Step 6: Configuration
 
-##### New config file: `conf/ICT/ICT.conf`
+##### 6.1 New config file: `conf/general_conf/dataset_splits.conf`
+
+Centralized per-dataset split ratios. **Single entry point for all modes** (`ict`, `test`, `eval`, `ori`) — edit this file to adjust any dataset's train/val/test split without touching Python code or `pretrain.conf`.
+
+```ini
+# ── Default split (used when a dataset is not listed below) ──
+[default]
+val_ratio = 0.1
+test_ratio = 0.4
+
+# ── Zero-shot benchmark (not in pretraining) ──
+[CAD3]
+val_ratio = 0.1
+test_ratio = 0.4
+
+[CAD5]
+val_ratio = 0.1
+test_ratio = 0.4
+
+[PEMS07M]
+val_ratio = 0.1
+test_ratio = 0.4
+
+[TrafficSH]
+val_ratio = 0.1
+test_ratio = 0.4
+
+[CHI_TAXI]
+val_ratio = 0.2
+test_ratio = 0.6
+
+[NYC_BIKE-3]
+val_ratio = 0.2
+test_ratio = 0.6
+
+# ── Fast Adaptation benchmark ──
+[CD_DIDI]
+val_ratio = 0.1
+test_ratio = 0.4
+
+[SZ_DIDI]
+val_ratio = 0.1
+test_ratio = 0.4
+
+# ── Supervised evaluation (in pretraining) ──
+[PEMS_BAY]
+val_ratio = 0.1
+test_ratio = 0.4
+
+[CAD8-1]
+val_ratio = 0.1
+test_ratio = 0.1
+
+[CAD8-2]
+val_ratio = 0.1
+test_ratio = 0.1
+
+[CAD12-2]
+val_ratio = 0.1
+test_ratio = 0.1
+
+# ── Common pretraining datasets ──
+[PEMS04]
+val_ratio = 0.1
+test_ratio = 0.4
+
+[PEMS08]
+val_ratio = 0.1
+test_ratio = 0.4
+
+[METR_LA]
+val_ratio = 0.1
+test_ratio = 0.4
+
+[NYC_TAXI]
+# Date-based split approximation (2016-2020 train, Jan-Feb 2021 val, Mar-Dec 2021 test)
+val_ratio = 0.028
+test_ratio = 0.139
+
+[TrafficHZ]
+val_ratio = 0.1
+test_ratio = 0.4
+
+[TrafficZZ]
+val_ratio = 0.1
+test_ratio = 0.4
+
+[TrafficCD]
+val_ratio = 0.1
+test_ratio = 0.4
+
+[TrafficJN]
+val_ratio = 0.1
+test_ratio = 0.4
+
+[TrafficNJ]
+val_ratio = 0.1
+test_ratio = 0.4
+
+[TrafficTJ]
+val_ratio = 0.1
+test_ratio = 0.4
+
+# CAD4-*, CAD7-*, CAD12-1 all use default (0.1, 0.4)
+```
+
+##### 6.2 New config file: `conf/ICT/ICT.conf`
 
 ```ini
 [ict]
@@ -529,7 +688,26 @@ demo_selection = random
 ict_batch_size = 32
 ```
 
-##### Modify `Params_pretrain.py`
+##### 6.3 Modify `lib/data_process.py` — Existing `define_dataloder()`
+
+Apply the same `dataset_splits.conf` mechanism to the existing dataloader so **all modes** benefit:
+
+```python
+from lib.ict_data_process import load_dataset_splits, get_dataset_split
+
+def define_dataloder(args):
+    splits, default_split = load_dataset_splits()
+    # ...
+    for dataset_name in args.dataset_use:
+        data = load_st_dataset(dataset_name, args)
+        val_ratio, test_ratio = get_dataset_split(dataset_name, splits, default_split)
+        data_train, data_val, data_test = split_data_by_ratio(data, val_ratio, test_ratio)
+        # ... rest unchanged ...
+```
+
+> **Backward compatible**: If `dataset_splits.conf` is missing or a dataset isn't listed, falls back to `[default]` section (0.1, 0.4). The `args.val_ratio` / `args.test_ratio` from `pretrain.conf` are no longer used for splitting — they remain in `pretrain.conf` only for reference / legacy compatibility.
+
+##### 6.4 Modify `Params_pretrain.py`
 
 Add ICT parameters to the argument parser:
 
@@ -627,22 +805,30 @@ All with `mask_value=0.001` (mask near-zero values) and `mae_thresh=0`.
 
 ### 5.4 Command Examples
 
+> **Dataset configuration**: Set `dataset_use` in `conf/general_conf/pretrain.conf` before running. Split ratios (`val_ratio`, `test_ratio`) are **auto-resolved** per dataset from `conf/general_conf/dataset_splits.conf` — **all modes** (`ict`, `test`, `eval`, `ori`) benefit from this. No need to manually edit `val_ratio` / `test_ratio` in `pretrain.conf` anymore.
+
 ```bash
+# ── pretrain.conf: only set dataset_use ──
+#   dataset_use = ['CD_DIDI']
+# (val_ratio / test_ratio auto-resolved from dataset_splits.conf for ALL modes)
+
 # ICT with K=1 on CD_DIDI
-python main.py -mode ict -model OpenCity -dataset_use "['CD_DIDI']" \
+python main.py -mode ict -model OpenCity \
     -load_pretrain_path OpenCity-plus.pth -num_demonstrations 1
 
+# ── pretrain.conf: dataset_use = ['PEMS07M'] ──
+
 # ICT with K=3, 10 random selections averaged on PEMS07M
-python main.py -mode ict -model OpenCity -dataset_use "['PEMS07M']" \
+python main.py -mode ict -model OpenCity \
     -load_pretrain_path OpenCity-plus.pth -num_demonstrations 3 \
     -num_prefix_selections 10
 
-# Baseline: Zero-shot (existing)
-python main.py -mode test -model OpenCity -dataset_use "['CD_DIDI']" \
+# Zero-shot (also auto-resolved)
+python main.py -mode test -model OpenCity \
     -load_pretrain_path OpenCity-plus.pth
 
-# Baseline: Fast Adaptation (existing)
-python main.py -mode eval -model OpenCity -dataset_use "['CD_DIDI']" \
+# Fast Adaptation (also auto-resolved)
+python main.py -mode eval -model OpenCity \
     -load_pretrain_path OpenCity-plus.pth -epochs 3
 ```
 

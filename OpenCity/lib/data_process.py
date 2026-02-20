@@ -2,6 +2,7 @@ import torch
 import numpy as np
 import random
 import os
+import configparser
 from torch.utils.data import Dataset, DataLoader, ConcatDataset
 
 def time_add(data, week_start, interval=5, weekday_only=False, holiday_list=None, day_start=0, hour_of_day=24):
@@ -285,6 +286,38 @@ def split_data_by_ratio(data, val_ratio, test_ratio):
     return train_data, val_data, test_data
 
 
+def load_dataset_splits(conf_path=None):
+    """Load per-dataset split ratios from dataset_splits.conf.
+
+    Returns:
+        splits: dict mapping dataset_name -> (val_ratio, test_ratio)
+        default: tuple (val_ratio, test_ratio) for unlisted datasets
+    """
+    if conf_path is None:
+        conf_path = os.path.join(
+            os.path.dirname(os.path.abspath(__file__)),
+            '..', 'conf', 'general_conf', 'dataset_splits.conf'
+        )
+    config = configparser.ConfigParser()
+    config.read(conf_path)
+    default_val = config.getfloat('default', 'val_ratio')
+    default_test = config.getfloat('default', 'test_ratio')
+    splits = {}
+    for section in config.sections():
+        if section == 'default':
+            continue
+        splits[section] = (
+            config.getfloat(section, 'val_ratio'),
+            config.getfloat(section, 'test_ratio'),
+        )
+    return splits, (default_val, default_test)
+
+
+def get_dataset_split(dataset_name, splits, default):
+    """Return (val_ratio, test_ratio) for a given dataset."""
+    return splits.get(dataset_name, default)
+
+
 class StandardScaler:
     """
     Standard the input
@@ -396,12 +429,14 @@ def define_dataloder(args):
     # print(tp_nums, node_nums)
     # print(sss)
 
+    splits, default_split = load_dataset_splits()
+
     for dataset_name in args.dataset_use:
-        print(args.dataset_use, dataset_name, args.val_ratio, args.test_ratio)
-        # print(sss)
+        val_ratio, test_ratio = get_dataset_split(dataset_name, splits, default_split)
+        print(args.dataset_use, dataset_name, val_ratio, test_ratio)
         data = load_st_dataset(dataset_name, args)
         num_nodes_dict[dataset_name] = data.shape[1]
-        data_train, data_val, data_test = split_data_by_ratio(data, args.val_ratio, args.test_ratio)
+        data_train, data_val, data_test = split_data_by_ratio(data, val_ratio, test_ratio)
         print('data_train', data_train.shape, data_val.shape, data_test.shape)
         if args.real_value == False:
             scaler_data, scaler_day, scaler_week = normalize_dataset(data_train, args.input_base_dim)
@@ -429,18 +464,15 @@ def define_dataloder(args):
 
     train_combine, val_combine, test_combine = ConcatDataset(dataloder_trn_list), ConcatDataset(dataloder_val_list), ConcatDataset(dataloder_tst_list)
 
-    # train_dataloader = DataLoader(train_combine, batch_size=1, shuffle=True)
-    # val_dataloader = DataLoader(val_combine, batch_size=1, shuffle=False)
-    # test_dataloader = DataLoader(test_combine, batch_size=1, shuffle=False)
-    if (1-args.val_ratio-args.test_ratio) <= 0:
+    if len(train_combine) == 0:
         train_dataloader = None
     else:
         train_dataloader = DataLoader(train_combine, batch_size=1, shuffle=True)
-    if args.val_ratio <= 0:
+    if len(val_combine) == 0:
         val_dataloader = None
     else:
         val_dataloader = DataLoader(val_combine, batch_size=1, shuffle=False)
-    if args.test_ratio <= 0:
+    if len(test_combine) == 0:
         test_dataloader = 0
     else:
         test_dataloader = DataLoader(test_combine, batch_size=1, shuffle=False)
