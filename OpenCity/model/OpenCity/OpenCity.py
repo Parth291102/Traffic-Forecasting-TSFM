@@ -188,7 +188,7 @@ class TemporalSelfAttention(nn.Module):
 
         self.proj_drop = nn.Dropout(proj_drop)
 
-    def forward(self, x_q, x_k, x_v, TH, TP, adj, geo_mask=None, sem_mask=None, trg_mask=False):
+    def forward(self, x_q, x_k, x_v, TH, TP, adj, geo_mask=None, sem_mask=None, trg_mask=False, t_attn_mask=None):
         B, T_q, N, D = x_q.shape
         T_k, T_v = x_k.shape[1], x_v.shape[1]
 
@@ -217,6 +217,9 @@ class TemporalSelfAttention(nn.Module):
         t_v = t_v.reshape(B, N, T_v, self.t_num_heads, self.head_dim).permute(0, 1, 3, 2, 4)
 
         t_attn = (t_q @ t_k.transpose(-2, -1)) * self.scale
+        if t_attn_mask is not None:
+            # t_attn: [B, N, H, T_q, T_k], t_attn_mask: [T_q, T_k] (True=attend)
+            t_attn = t_attn.masked_fill(~t_attn_mask.unsqueeze(0).unsqueeze(0).unsqueeze(0), -1e9)
         if trg_mask:
             ones = torch.ones_like(t_attn).to(self.device)
             dec_mask = torch.triu(ones, diagonal=1)
@@ -246,16 +249,16 @@ class STEncoderBlock(nn.Module):
         mlp_hidden_dim = int(dim * mlp_ratio)
         self.mlp = FeedForward(hidden_size=dim, intermediate_size=mlp_hidden_dim)
 
-    def forward(self, x, dec_in, enc_out, TH, TP, adj, geo_mask=None, sem_mask=None):
+    def forward(self, x, dec_in, enc_out, TH, TP, adj, geo_mask=None, sem_mask=None, t_attn_mask=None):
         if self.type_ln == 'pre':
             x_nor1 = self.norm1(x)
-            x = x + self.drop_path(self.st_attn(x_nor1, x_nor1, x_nor1, TH, TP, adj, geo_mask=geo_mask, sem_mask=sem_mask))
+            x = x + self.drop_path(self.st_attn(x_nor1, x_nor1, x_nor1, TH, TP, adj, geo_mask=geo_mask, sem_mask=sem_mask, t_attn_mask=t_attn_mask))
             x = x + self.drop_path(self.mlp(self.norm2(x)))
         elif self.type_ln == 'post':
-            x = self.norm1((x + self.drop_path(self.st_attn(x, x, x, TH, TP, adj, geo_mask=geo_mask, sem_mask=sem_mask))))
+            x = self.norm1((x + self.drop_path(self.st_attn(x, x, x, TH, TP, adj, geo_mask=geo_mask, sem_mask=sem_mask, t_attn_mask=t_attn_mask))))
             x = self.norm2((x + self.drop_path(self.mlp(x))))
         else:
-            x = x + self.drop_path(self.st_attn(x, x, x, TH, TP, adj, geo_mask=geo_mask, sem_mask=sem_mask))
+            x = x + self.drop_path(self.st_attn(x, x, x, TH, TP, adj, geo_mask=geo_mask, sem_mask=sem_mask, t_attn_mask=t_attn_mask))
             x = x + self.drop_path(self.mlp(self.norm2(x)))
         return x
 
@@ -360,3 +363,58 @@ class OpenCity(nn.Module):
         skip = skip + means
 
         return skip
+
+    def forward_ict(self, input, lbls, demos_x, demos_y, select_dataset):
+        """
+        ICT forward pass via Residual Correction.
+
+        Each input (query and demos) is processed independently through the
+        standard 24-patch forward path — identical to pretraining. Demo ground-
+        truth futures are used to estimate the model's systematic error, which
+        is then subtracted from the query prediction.
+
+        Args:
+            input:   [B, T, N, F]   — query history
+            lbls:    [B, T, N, F]   — query future (only temporal features used)
+            demos_x: [B, K, T, N, F] — demonstration histories
+            demos_y: [B, K, T, N, F] — demonstration futures (ground-truth flow + temporal)
+            select_dataset: str — dataset identifier
+
+        Returns:
+            [B, T, N, 1] — corrected prediction for query
+        """
+        bs, time_steps, num_nodes, num_feas = input.size()
+        K = demos_x.shape[1]
+        assert demos_x.dim() == 5, f"demos_x must be [B, K, T, N, F], got {demos_x.shape}"
+        assert demos_x.shape[0] == bs, f"demo batch size mismatch: {demos_x.shape[0]} vs {bs}"
+
+        # ===== K=0 fallback: identical to forward() =====
+        if K == 0:
+            return self.forward(input, lbls, select_dataset)
+
+        # ===== STEP 1: Standard query prediction (24 patches, same as forward) =====
+        pred_query = self.forward(input, lbls, select_dataset)  # [B, T, N, 1]
+
+        # ===== STEP 2: For each demo, predict its future and compute residual =====
+        residuals = []  # List of [B, T, N, 1]
+        for k in range(K):
+            dk_x = demos_x[:, k]  # [B, T, N, F] — demo history
+            dk_y = demos_y[:, k]  # [B, T, N, F] — demo ground-truth future
+
+            # Demo's ground-truth flow values
+            dk_gt_flow = dk_y[..., :self.output_dim]   # [B, T, N, 1]
+
+            # Model's prediction for this demo (standard 24-patch forward)
+            dk_pred = self.forward(dk_x, dk_y, select_dataset)  # [B, T, N, 1]
+
+            # Residual = ground truth - prediction (model's systematic error)
+            residual_k = dk_gt_flow - dk_pred  # [B, T, N, 1]
+            residuals.append(residual_k)
+
+        # ===== STEP 3: Average residuals and correct query prediction =====
+        avg_residual = torch.stack(residuals, dim=0).mean(dim=0)  # [B, T, N, 1]
+
+        # Corrected prediction
+        pred_corrected = pred_query + avg_residual  # [B, T, N, 1]
+
+        return pred_corrected

@@ -11,7 +11,7 @@ This document details the plan to integrate **In-Context Tuning (ICT)** into the
 | Parameter updates | Train linear head, 3 epochs | **None** |
 | Training compute | ~minutes per dataset | **Zero** |
 | Extra information at inference | None | K demo (history, future) pairs |
-| Inference cost increase | None | Attention over 24+K×48 patches (vs 24) |
+| Inference cost increase | None | K+1 standard forward passes (vs 1) |
 | Applicable scenario | Need gradient computation on target data | Only need a few sample pairs for prompting |
 
 ### Evaluation Scope
@@ -46,42 +46,44 @@ With ICT demonstrations:
   - **Spatial patterns**: "Node X and node Y are correlated"
   - **Prediction mappings**: "Given this history shape, the future looks like this"
 
-### 2.3 Architecture: Joint Processing via Sequence Extension
+### 2.3 Architecture: Residual Correction (v2)
 
-**Approach**: Encode demonstrations as patch sequences and concatenate them with the query's patches along the temporal (patch) dimension. All patches pass through the existing encoder blocks jointly. The prediction head operates only on the query's final 24 patches.
+> **Note**: The original plan (v1) used sequence extension — concatenating demo+query patches into a K×48+24 sequence processed jointly through encoder blocks. This was implemented and tested (Experiments 2-4), but **abandoned** because OpenCity was pretrained on fixed 24-patch sequences; extended sequences are OOD and degrade performance. See `docs/05_experiment_log.md` for details.
+
+**Approach**: Process each input independently through the standard `forward()` path (exactly 24 patches, identical to pretraining). Use demo ground-truth futures to estimate and correct the model's systematic error.
 
 ```
-Demo 1:  [hist_patches(24)] [future_patches(24)]   = 48 patches
-Demo 2:  [hist_patches(24)] [future_patches(24)]   = 48 patches
-...
-Demo K:  [hist_patches(24)] [future_patches(24)]   = 48 patches
-Query:   [hist_patches(24)]                         = 24 patches
-─────────────────────────────────────────────────────────────────
-Total:   K × 48 + 24 patches in the sequence
+pred_query   = model.forward(query_hist, query_lbl, dataset)      # standard 24-patch forward
+pred_demo_k  = model.forward(demo_k_hist, demo_k_lbl, dataset)    # same standard forward
+error_k      = demo_k_ground_truth_flow - pred_demo_k             # model's systematic error on demo k
+correction   = mean(error_1, ..., error_K)                        # averaged correction
+final        = pred_query + correction                            # corrected prediction
 ```
 
-**Why joint processing (not static context injection)**:
-- All patches share the same embedding space (same `PatchEmbedding_flow`, same `PatchEmbedding_time`, same `LaplacianPE`)
-- TC Cross-Attention and T Self-Attention naturally handle variable-length sequences — no architecture changes needed
-- Demo patches are updated through encoder layers alongside query patches, maintaining representation coherence across layers
-- The prediction head (`Linear(24*256, 288)`) only sees the query's 24 patches → **zero architecture change** for the output
+**Why residual correction**:
+- **Zero OOD**: Every forward call uses exactly 24 patches — identical to pretraining
+- **Zero new parameters**: No architecture changes, no new layers
+- **fp32 inference**: Same memory as zero-shot per call (no bfloat16 needed)
+- **Physically interpretable**: Estimates the model's systematic prediction bias on a similar sample, then corrects it
+- **Compute cost**: K+1 sequential forward passes (K=1 → 2× compute; trivially parallelizable)
 
-### 2.4 How Attention Routes Information from Demos to Query
+### 2.4 How Demonstrations Provide Information (Residual Correction)
 
-**TC Cross-Attention** (the key mechanism):
-- **Q from TP**: The query's Q vectors encode "I need to predict 8:00am-8:00am+1day on a Wednesday"
-- **K from TH**: Keys from demo future patches encode "this data is from 8:00am-8:00am+1day on a Monday"
-- **V from enc**: Values from demo future patches contain **actual ground-truth flow patterns**
+The key insight: if the model makes similar systematic errors on nearby traffic patterns, then the demo's prediction error is a good estimate of the query's prediction error.
 
-When demo and query share similar temporal slots (same time of day, similar day of week), the attention scores will be high, and the query effectively retrieves the demo's ground-truth future flow patterns as context.
+**Error estimation**:
+- For each demo k, we have both the ground-truth future `dk_gt` and the model's prediction `pred_dk`
+- The residual `dk_gt - pred_dk` captures the model's systematic bias on that sample
+- If demo k is from a similar traffic regime as the query, this bias transfers
 
-**T Self-Attention**:
-- After TC attention infuses temporal-context info, self-attention allows all patches (demo + query) to interact directly
-- The query's history patches can attend to the demo's history patches (learning input patterns) and the demo's future patches (learning prediction patterns)
+**Correction averaging**:
+- With K>1 demos, averaging residuals reduces noise from individual demo selection
+- With S>1 prefix selections, averaging over S independent demo sets further reduces variance
 
-**GCN**:
-- Operates per-patch: `einsum('bdkt,nk->bdnt', h, a)` where `d` is the patch dimension
-- Naturally handles variable `d` (K×48+24 vs 24) — no modification needed
+**What the model extracts from demos**:
+- **Scale calibration**: If the model consistently under/over-predicts by a factor, the residual corrects it
+- **Pattern-specific bias**: Rush-hour prediction errors differ from off-peak — demos from similar time slots provide better corrections
+- **Dataset adaptation**: Different datasets have different characteristics; demos from the target dataset capture dataset-specific biases
 
 ---
 
@@ -89,19 +91,138 @@ When demo and query share similar temporal slots (same time of day, similar day 
 
 ### 3.1 File Modifications Summary
 
-| File | Change Type | Description |
-|------|-------------|-------------|
-| `conf/general_conf/dataset_splits.conf` | **New file** | Per-dataset split ratios (centralized, all modes) |
-| `lib/data_process.py` | **Modify** | `define_dataloder()` uses `dataset_splits.conf` for per-dataset splits |
-| `lib/ict_data_process.py` | **New file** | ICT-aware dataset and dataloader |
-| `model/OpenCity/OpenCity.py` | **Add method** | `forward_ict()` — new forward pass with demo processing |
-| `model/Model.py` | **Modify** | Transparent demo parameter forwarding |
-| `model/BasicTrainer.py` | **Add method** | `test_ict()` — ICT inference with metrics |
-| `model/Run.py` | **Modify** | New `mode='ict'` branch |
-| `lib/Params_pretrain.py` | **Modify** | ICT-related parameter parsing |
-| `conf/ICT/ICT.conf` | **New file** | ICT configuration defaults |
+| File | Change Type | Description | Status |
+|------|-------------|-------------|--------|
+| `conf/general_conf/dataset_splits.conf` | **New file** | Per-dataset split ratios (centralized, all modes) | **Done** |
+| `lib/data_process.py` | **Modify** | `define_dataloder()` uses `dataset_splits.conf` for per-dataset splits | **Done** |
+| `lib/ict_data_process.py` | **New file** | ICT-aware dataset and dataloader | **Done** |
+| `model/OpenCity/OpenCity.py` | **Add method** | `forward_ict()` — residual correction forward pass | **Done** |
+| `model/Model.py` | **Modify** | Transparent demo parameter forwarding | **Done** |
+| `model/BasicTrainer.py` | **Add method** | `test_ict()` — ICT inference with metrics | **Done** |
+| `model/Run.py` | **Modify** | New `mode='ict'` branch | **Done** |
+| `lib/Params_pretrain.py` | **Modify** | ICT-related parameter parsing | **Done** |
+| `conf/ICT/ICT.conf` | **New file** | ICT configuration defaults | **Done** |
 
 ### 3.2 Step-by-Step Implementation
+
+---
+
+#### Step 0 ✅ (Done): Configuration Foundation
+
+> **Completed first** — prerequisite for all modes (`ict`, `test`, `eval`, `ori`, `pretrain`).
+
+##### 0.1 New config file: `conf/general_conf/dataset_splits.conf`
+
+Centralized per-dataset split ratios. **Single entry point for all modes** — edit this file to adjust any dataset's train/val/test split without touching Python code or `pretrain.conf`.
+
+```ini
+# ── Default split (fallback for unlisted datasets) ──
+[default]
+val_ratio = 0.1
+test_ratio = 0.4
+
+# ── Zero-shot benchmark (not in pretraining) ──
+[CAD3]
+val_ratio = 0.1
+test_ratio = 0.4
+
+[CAD5]
+val_ratio = 0.1
+test_ratio = 0.4
+
+[PEMS07M]
+val_ratio = 0.1
+test_ratio = 0.4
+
+[TrafficSH]
+val_ratio = 0.1
+test_ratio = 0.4
+
+[CHI_TAXI]
+val_ratio = 0.2
+test_ratio = 0.6
+
+[NYC_BIKE-3]
+val_ratio = 0.2
+test_ratio = 0.6
+
+# ── Fast Adaptation benchmark ──
+[CD_DIDI]
+val_ratio = 0.1
+test_ratio = 0.4
+
+[SZ_DIDI]
+val_ratio = 0.1
+test_ratio = 0.4
+
+# (plus supervised eval and pretraining datasets — see full file)
+# CAD4-*, CAD7-*, CAD12-1 all use default (0.1, 0.4)
+```
+
+##### 0.2 Modified `lib/data_process.py` — Helper functions & `define_dataloder()`
+
+Added `load_dataset_splits()` and `get_dataset_split()` to `data_process.py`. Modified `define_dataloder()` to use per-dataset splits from `dataset_splits.conf` instead of `args.val_ratio` / `args.test_ratio`.
+
+```python
+def load_dataset_splits(conf_path=None):
+    """Load per-dataset split ratios from dataset_splits.conf."""
+    if conf_path is None:
+        conf_path = os.path.join(
+            os.path.dirname(os.path.abspath(__file__)),
+            '..', 'conf', 'general_conf', 'dataset_splits.conf'
+        )
+    config = configparser.ConfigParser()
+    config.read(conf_path)
+    default_val = config.getfloat('default', 'val_ratio')
+    default_test = config.getfloat('default', 'test_ratio')
+    splits = {}
+    for section in config.sections():
+        if section == 'default':
+            continue
+        splits[section] = (
+            config.getfloat(section, 'val_ratio'),
+            config.getfloat(section, 'test_ratio'),
+        )
+    return splits, (default_val, default_test)
+
+
+def get_dataset_split(dataset_name, splits, default):
+    """Return (val_ratio, test_ratio) for a given dataset."""
+    return splits.get(dataset_name, default)
+```
+
+In `define_dataloder()`:
+```python
+splits, default_split = load_dataset_splits()
+for dataset_name in args.dataset_use:
+    val_ratio, test_ratio = get_dataset_split(dataset_name, splits, default_split)
+    data_train, data_val, data_test = split_data_by_ratio(data, val_ratio, test_ratio)
+    # ... rest unchanged ...
+```
+
+> **Backward compatible**: If `dataset_splits.conf` is missing or a dataset isn't listed, falls back to `[default]` section (0.1, 0.4). The `args.val_ratio` / `args.test_ratio` from `pretrain.conf` are no longer used for splitting — they remain in `pretrain.conf` only for reference / legacy compatibility.
+
+##### 0.3 New config file: `conf/ICT/ICT.conf`
+
+```ini
+[ict]
+num_demonstrations = 1
+num_prefix_selections = 1
+demo_selection = random
+ict_batch_size = 32
+```
+
+##### 0.4 Modified `lib/Params_pretrain.py` — ICT parameters
+
+```python
+# ICT parameters
+args.add_argument('-num_demonstrations', default=1, type=int,
+                  help='Number of demonstration pairs (K) for ICT')
+args.add_argument('-num_prefix_selections', default=1, type=int,
+                  help='Number of independent demo sets (S) to average at test time')
+args.add_argument('-demo_selection', default='random', type=str,
+                  help='Demo selection strategy: random, recent, similar')
+```
 
 ---
 
@@ -281,164 +402,73 @@ def define_ict_dataloader(args):
 
 ---
 
-#### Step 2: OpenCity Model — `forward_ict` Method (`model/OpenCity/OpenCity.py`)
+#### Step 2 ✅ (Done): OpenCity Model — `forward_ict` Method (`model/OpenCity/OpenCity.py`)
 
-**Add a new method** `forward_ict` to the `OpenCity` class. The original `forward` method is **NOT modified** (full backward compatibility).
+**Added method** `forward_ict` to the `OpenCity` class using **Residual Correction** approach (v2). The original `forward` method is **NOT modified** (full backward compatibility).
+
+> **History**: v1 (sequence extension) was implemented first, tested in Experiments 2-4, and abandoned. The current code is v2 (residual correction). See `docs/05_experiment_log.md § Approach Evolution`.
 
 ```python
 def forward_ict(self, input, lbls, demos_x, demos_y, select_dataset):
     """
-    ICT forward pass: process query with K demonstrations as context.
+    ICT forward pass using Residual Correction.
+
+    Each input (query + each demo) is processed independently through
+    the standard 24-patch forward() path. Demo residuals estimate and
+    correct the model's systematic prediction error.
 
     Args:
         input:   [B, T, N, F]   — query history
-        lbls:    [B, T, N, F]   — query future (only temporal features used)
+        lbls:    [B, T, N, F]   — query future (temporal features only)
         demos_x: [B, K, T, N, F] — demonstration histories
         demos_y: [B, K, T, N, F] — demonstration futures (ground-truth flow + temporal)
         select_dataset: str — dataset identifier
 
     Returns:
-        [B, T, N, 1] — predicted future flow for query
+        [B, T, N, 1] — corrected predicted future flow for query
     """
-    bs, time_steps, num_nodes, num_feas = input.size()
     K = demos_x.shape[1]
-    assert demos_x.dim() == 5, f"demos_x must be [B, K, T, N, F], got {demos_x.shape}"
-    assert demos_x.shape[0] == bs, f"demo batch size mismatch: {demos_x.shape[0]} vs {bs}"
 
-    # ===== QUERY PROCESSING (same as forward) =====
+    # --- Query prediction (standard 24-patch forward) ---
+    pred_query = self.forward(input, lbls, select_dataset)  # [B, T, N, 1]
 
-    # Query temporal context
-    query_TCH = input[..., self.output_dim:].long()      # [B, T, N, 2]
-    query_TCP = lbls[..., self.output_dim:].long()        # [B, T, N, 2]
-    query_TH, query_TP = self.patch_embedding_time(
-        torch.cat([query_TCH, query_TCP], dim=-1)         # [B, T, N, 4]
-    )  # Both: [B, 24, N, D]
+    if K == 0:
+        return pred_query  # No demos → pure zero-shot
 
-    # Spatial PE
-    spa_feas = self.spatial_embedding(
-        self.lap_mx_dict[select_dataset].to(self.device)
-    )  # [1, 1, N, D]
-
-    query_TH = query_TH + spa_feas
-    query_TP = query_TP + spa_feas
-
-    # Query Instance Normalization
-    query_flow = input[..., :self.output_dim]             # [B, T, N, 1]
-    query_means = query_flow.mean(1, keepdim=True).detach()
-    query_centered = query_flow - query_means
-    query_stdev = torch.sqrt(
-        torch.var(query_centered, dim=1, keepdim=True, unbiased=False) + 1e-5
-    ).detach()
-    query_normed = query_centered / query_stdev           # [B, T, N, 1]
-
-    # Query patch embedding
-    query_enc = self.patch_embedding_flow(query_normed)   # [B, 24, N, D]
-
-    # ===== DEMONSTRATION PROCESSING =====
-
-    all_demo_enc = []      # List of [B, 48, N, D] — one per demo
-    all_demo_TH = []       # temporal keys for each demo
-    all_demo_TP = []       # cached dk_TP to avoid recomputation
-
+    # --- Demo residuals ---
+    residuals = []
     for k in range(K):
         dk_x = demos_x[:, k]  # [B, T, N, F]
         dk_y = demos_y[:, k]  # [B, T, N, F]
 
-        # Demo temporal context
-        dk_TCH = dk_x[..., self.output_dim:].long()
-        dk_TCP = dk_y[..., self.output_dim:].long()
-        dk_TH, dk_TP = self.patch_embedding_time(
-            torch.cat([dk_TCH, dk_TCP], dim=-1)
-        )  # Both: [B, 24, N, D]
-        dk_TH = dk_TH + spa_feas
-        dk_TP = dk_TP + spa_feas
+        # Demo prediction (same standard forward)
+        pred_dk = self.forward(dk_x, dk_y, select_dataset)  # [B, T, N, 1]
 
-        # Demo Instance Normalization (based on demo's own history)
-        dk_hist_flow = dk_x[..., :self.output_dim]       # [B, T, N, 1]
-        dk_futu_flow = dk_y[..., :self.output_dim]       # [B, T, N, 1]
-        dk_means = dk_hist_flow.mean(1, keepdim=True).detach()
-        dk_centered = dk_hist_flow - dk_means
-        dk_stdev = torch.sqrt(
-            torch.var(dk_centered, dim=1, keepdim=True, unbiased=False) + 1e-5
-        ).detach()
-        dk_hist_normed = dk_centered / dk_stdev
-        dk_futu_normed = (dk_futu_flow - dk_means) / dk_stdev
+        # Ground-truth future flow
+        dk_gt_flow = dk_y[..., :self.output_dim]  # [B, T, N, 1]
 
-        # Demo patch embeddings
-        dk_hist_enc = self.patch_embedding_flow(dk_hist_normed)  # [B, 24, N, D]
-        dk_futu_enc = self.patch_embedding_flow(dk_futu_normed)  # [B, 24, N, D]
+        # Residual = ground truth - prediction (systematic error)
+        residuals.append(dk_gt_flow - pred_dk)
 
-        # Concatenate demo history + future patches
-        dk_enc = torch.cat([dk_hist_enc, dk_futu_enc], dim=1)   # [B, 48, N, D]
-        dk_th_full = torch.cat([dk_TH, dk_TP], dim=1)           # [B, 48, N, D]
-
-        all_demo_enc.append(dk_enc)
-        all_demo_TH.append(dk_th_full)
-        all_demo_TP.append(dk_TP)  # Cache dk_TP for TP_all construction
-
-    # ===== CONCATENATE: demos + query =====
-
-    # Encoder input: [demo1(48)] [demo2(48)] ... [demoK(48)] [query(24)]
-    enc_all = torch.cat(all_demo_enc + [query_enc], dim=1)   # [B, K*48+24, N, D]
-    assert enc_all.shape[1] == K * 48 + 24, f"enc_all T-dim: expected {K*48+24}, got {enc_all.shape[1]}"
-
-    # TH for all positions (used as KEY in TC attention)
-    TH_all = torch.cat(all_demo_TH + [query_TH], dim=1)      # [B, K*48+24, N, D]
-
-    # TP for all positions (used as QUERY in TC attention)
-    # Demo positions: use their own TP (repeated for hist+future patches)
-    # Query positions: use query_TP
-    # Reuse cached dk_TP from the loop above (no redundant recomputation)
-    all_demo_TP_full = [
-        torch.cat([dk_TP, dk_TP], dim=1)  # [B, 48, N, D]
-        for dk_TP in all_demo_TP
-    ]
-    TP_all = torch.cat(all_demo_TP_full + [query_TP], dim=1)  # [B, K*48+24, N, D]
-
-    # ===== ENCODER BLOCKS =====
-
-    adj = self.adj_mx_dict[select_dataset].to(self.device)
-    geo_mask = self.geo_mask_dict[select_dataset].to(self.device)
-
-    for encoder_block in self.encoder_blocks:
-        enc_all = encoder_block(
-            enc_all, enc_all, enc_all,
-            TH_all, TP_all, adj, geo_mask, self.sem_mask
-        )
-    # enc_all: [B, K*48+24, N, D]
-
-    # ===== EXTRACT QUERY PATCHES & PREDICT =====
-
-    query_out = enc_all[:, -24:, :, :]  # Last 24 patches = query
-    assert query_out.shape[1] == 24, f"query_out T-dim: expected 24, got {query_out.shape[1]}"
-    # [B, 24, N, D]
-
-    skip = query_out.permute(0, 2, 3, 1).contiguous()  # [B, N, D, 24]
-    skip = self.flatten(skip)                            # [B, N, D*24]
-    skip = self.linear(skip)                             # [B, N, output_window]
-    skip = skip.transpose(1, 2).unsqueeze(-1)            # [B, T, N, 1]
-    skip = skip[:, :time_steps, :, :]
-
-    # De-Instance-Normalization (using query's own stats)
-    skip = skip * query_stdev
-    skip = skip + query_means
-
-    return skip
+    # --- Correction ---
+    avg_residual = torch.stack(residuals).mean(dim=0)  # [B, T, N, 1]
+    return pred_query + avg_residual
 ```
 
 **Key Design Notes:**
-- Demo future flow values go through `PatchEmbedding_flow` — same embedding as history. This reuses pretrained weights with zero new parameters.
-- Each demo is independently instance-normalized using its own history's mean/stdev. The query uses its own stats. After normalization, all are in the same zero-mean unit-variance space.
-- Demo temporal features: history uses `dk_TH`, future uses `dk_TP`. This tells the attention mechanism **when** each demo patch's data comes from.
-- No new parameters are introduced. All embeddings, attention layers, GCN, FFN, and the prediction head are from the pretrained model.
+- Every `self.forward()` call uses exactly 24 patches — identical to pretraining. Zero OOD.
+- No new parameters. Reuses the pretrained model entirely.
+- fp32 inference. No bfloat16 needed (same VRAM as zero-shot per call).
+- K=0 gracefully degrades to zero-shot prediction.
+- Residual correction is physically interpretable: corrects systematic model bias.
 
-**Optimization — TP caching**: The demo `dk_TP` is now cached in `all_demo_TP` during the first loop and reused for `TP_all` construction. No redundant `patch_embedding_time` calls.
+> **Legacy note**: `TemporalSelfAttention.forward()` and `STEncoderBlock.forward()` still have an optional `t_attn_mask=None` parameter from the v1 block-diagonal mask experiment. It defaults to None and is harmless — kept for reference but not used by v2.
 
 ---
 
-#### Step 3: Traffic_model Wrapper (`model/Model.py`)
+#### Step 3 ✅ (Done): Traffic_model Wrapper (`model/Model.py`)
 
-Modify `Traffic_model.forward` to transparently forward demo parameters:
+Modified `Traffic_model.forward` to transparently forward demo parameters:
 
 ```python
 def forward(self, source, label, select_dataset, batch_seen=None,
@@ -459,9 +489,9 @@ def forward(self, source, label, select_dataset, batch_seen=None,
 
 ---
 
-#### Step 4: ICT Test Method (`model/BasicTrainer.py`)
+#### Step 4 ✅ (Done): ICT Test Method (`model/BasicTrainer.py`)
 
-Add a new static method `test_ict` to the `Trainer` class:
+Added static method `test_ict` to the `Trainer` class:
 
 ```python
 @staticmethod
@@ -537,9 +567,9 @@ def test_ict(model, args, scaler_dict, test_dataloader, logger, path=None,
 
 ---
 
-#### Step 5: Mode Dispatch (`model/Run.py`)
+#### Step 5 ✅ (Done): Mode Dispatch (`model/Run.py`)
 
-Add `mode='ict'` branch:
+Added `mode='ict'` branch (fp32 inference, no bfloat16):
 
 ```python
 elif args.mode == 'ict':
@@ -570,204 +600,43 @@ elif args.mode == 'ict':
 
 ---
 
-#### Step 6: Configuration
+#### ~~Step 6: Configuration~~ → Merged into Step 0 ✅
 
-##### 6.1 New config file: `conf/general_conf/dataset_splits.conf`
-
-Centralized per-dataset split ratios. **Single entry point for all modes** (`ict`, `test`, `eval`, `ori`) — edit this file to adjust any dataset's train/val/test split without touching Python code or `pretrain.conf`.
-
-```ini
-# ── Default split (used when a dataset is not listed below) ──
-[default]
-val_ratio = 0.1
-test_ratio = 0.4
-
-# ── Zero-shot benchmark (not in pretraining) ──
-[CAD3]
-val_ratio = 0.1
-test_ratio = 0.4
-
-[CAD5]
-val_ratio = 0.1
-test_ratio = 0.4
-
-[PEMS07M]
-val_ratio = 0.1
-test_ratio = 0.4
-
-[TrafficSH]
-val_ratio = 0.1
-test_ratio = 0.4
-
-[CHI_TAXI]
-val_ratio = 0.2
-test_ratio = 0.6
-
-[NYC_BIKE-3]
-val_ratio = 0.2
-test_ratio = 0.6
-
-# ── Fast Adaptation benchmark ──
-[CD_DIDI]
-val_ratio = 0.1
-test_ratio = 0.4
-
-[SZ_DIDI]
-val_ratio = 0.1
-test_ratio = 0.4
-
-# ── Supervised evaluation (in pretraining) ──
-[PEMS_BAY]
-val_ratio = 0.1
-test_ratio = 0.4
-
-[CAD8-1]
-val_ratio = 0.1
-test_ratio = 0.1
-
-[CAD8-2]
-val_ratio = 0.1
-test_ratio = 0.1
-
-[CAD12-2]
-val_ratio = 0.1
-test_ratio = 0.1
-
-# ── Common pretraining datasets ──
-[PEMS04]
-val_ratio = 0.1
-test_ratio = 0.4
-
-[PEMS08]
-val_ratio = 0.1
-test_ratio = 0.4
-
-[METR_LA]
-val_ratio = 0.1
-test_ratio = 0.4
-
-[NYC_TAXI]
-# Date-based split approximation (2016-2020 train, Jan-Feb 2021 val, Mar-Dec 2021 test)
-val_ratio = 0.028
-test_ratio = 0.139
-
-[TrafficHZ]
-val_ratio = 0.1
-test_ratio = 0.4
-
-[TrafficZZ]
-val_ratio = 0.1
-test_ratio = 0.4
-
-[TrafficCD]
-val_ratio = 0.1
-test_ratio = 0.4
-
-[TrafficJN]
-val_ratio = 0.1
-test_ratio = 0.4
-
-[TrafficNJ]
-val_ratio = 0.1
-test_ratio = 0.4
-
-[TrafficTJ]
-val_ratio = 0.1
-test_ratio = 0.4
-
-# CAD4-*, CAD7-*, CAD12-1 all use default (0.1, 0.4)
-```
-
-##### 6.2 New config file: `conf/ICT/ICT.conf`
-
-```ini
-[ict]
-num_demonstrations = 1
-num_prefix_selections = 1
-demo_selection = random
-ict_batch_size = 32
-```
-
-##### 6.3 Modify `lib/data_process.py` — Existing `define_dataloder()`
-
-Apply the same `dataset_splits.conf` mechanism to the existing dataloader so **all modes** benefit:
-
-```python
-from lib.ict_data_process import load_dataset_splits, get_dataset_split
-
-def define_dataloder(args):
-    splits, default_split = load_dataset_splits()
-    # ...
-    for dataset_name in args.dataset_use:
-        data = load_st_dataset(dataset_name, args)
-        val_ratio, test_ratio = get_dataset_split(dataset_name, splits, default_split)
-        data_train, data_val, data_test = split_data_by_ratio(data, val_ratio, test_ratio)
-        # ... rest unchanged ...
-```
-
-> **Backward compatible**: If `dataset_splits.conf` is missing or a dataset isn't listed, falls back to `[default]` section (0.1, 0.4). The `args.val_ratio` / `args.test_ratio` from `pretrain.conf` are no longer used for splitting — they remain in `pretrain.conf` only for reference / legacy compatibility.
-
-##### 6.4 Modify `Params_pretrain.py`
-
-Add ICT parameters to the argument parser:
-
-```python
-# ICT parameters
-parser.add_argument('-num_demonstrations', default=1, type=int,
-                    help='Number of demonstration pairs (K) for ICT')
-parser.add_argument('-num_prefix_selections', default=1, type=int,
-                    help='Number of random demo sets to average at test time')
-parser.add_argument('-demo_selection', default='random', type=str,
-                    help='Demo selection strategy: random, recent, similar')
-```
+> All configuration work (`dataset_splits.conf`, `ICT.conf`, `Params_pretrain.py`, `data_process.py` integration) has been completed and is documented in **Step 0**.
 
 ---
 
-## 4. Shape Analysis & Compatibility Verification
+## 4. Compute & Memory Analysis (Residual Correction)
 
-### 4.1 Sequence Length with Demonstrations
+### 4.1 Forward Passes per Sample
 
-| K | Total patches | Attention matrix size | Relative to baseline |
+With residual correction, each forward call processes exactly 24 patches (identical to zero-shot). The cost is K+1 forward calls per sample.
+
+| K | Forward Calls | Relative Compute | Memory (per call) |
 |---|---|---|---|
-| 0 (baseline) | 24 | 24×24 = 576 | 1.0× |
-| 1 | 72 | 72×72 = 5,184 | 9.0× |
-| 3 | 168 | 168×168 = 28,224 | 49.0× |
-| 5 | 264 | 264×264 = 69,696 | 121.0× |
+| 0 (zero-shot) | 1 | 1.0× | Same as baseline |
+| 1 | 2 | 2.0× | Same as baseline |
+| 3 | 4 | 4.0× | Same as baseline |
+| 5 | 6 | 6.0× | Same as baseline |
 
-**Memory recommendation**: K=1 with batch_size=32 should be comparable to baseline batch_size=64. For K=3+, reduce batch size accordingly.
+**Key advantage over v1 (sequence extension)**:
+- v1 K=1: 72×72 = 5,184 attention matrix (9× memory)
+- v2 K=1: 2 × (24×24 = 576) attention matrix (2× compute, 1× memory per call)
+- v1 K=3: 168×168 = 28,224 attention matrix (49× memory, needed bfloat16)
+- v2 K=3: 4 × (24×24 = 576) attention matrix (4× compute, 1× memory per call)
 
-### 4.2 Component Compatibility Check
+**Memory**: No VRAM increase per call. Batch size does not need to be reduced.
 
-| Component | Variable T? | Compatible? | Notes |
-|-----------|-------------|-------------|-------|
-| `PatchEmbedding_flow` | N/A | ✅ | Applied per-demo, always produces 24 patches |
-| `PatchEmbedding_time` | N/A | ✅ | Applied per-demo, always produces 24 patches |
-| `LaplacianPE` | No T dim | ✅ | Broadcast to any T |
-| `TemporalSelfAttention` TC | `T_q`, `T_k`, `T_v` from tensor | ✅ | Q/K/V dims derived from actual shapes |
-| `TemporalSelfAttention` T | Same | ✅ | Self-attention on variable T |
-| `GCN` | `einsum('bdkt,nk->bdnt')` | ✅ | `d` (T) is a batch-like dim |
-| `FeedForward` | Pointwise | ✅ | Operates on last dim only |
-| `LlamaRMSNorm` | Last dim | ✅ | Operates on last dim only |
-| `DropPath` | Any shape | ✅ | Drops along batch dim |
-| `linear` (pred head) | Fixed 24×D→288 | ✅ | Only applied to query's 24 patches |
+### 4.2 Residual Correction: No Architecture Compatibility Concerns
 
-**Result**: All components naturally handle variable sequence lengths. **No architecture modifications required.**
+Since every forward call goes through the unmodified `forward()` method with standard 24-patch input, there are **zero compatibility concerns**:
+- All encoder blocks see their pretrained sequence length
+- All attention matrices are 24×24
+- The prediction head sees 24 patches as expected
+- Instance normalization operates as designed
+- fp32 precision preserved throughout
 
-### 4.3 Instance Normalization Isolation
-
-Each demo and the query have **independent** Instance Normalization:
-
-```
-Demo k: means_k = dk_hist_flow.mean(dim=1), stdev_k from dk_hist_flow
-         dk_hist_normed = (dk_hist_flow - means_k) / stdev_k
-         dk_futu_normed = (dk_futu_flow - means_k) / stdev_k
-Query:   means_q = query_flow.mean(dim=1), stdev_q from query_flow
-         query_normed = (query_flow - means_q) / stdev_q
-```
-
-After normalization, all patches are in the same zero-mean, unit-variance space — ensuring representation compatibility despite potentially different data scales.
-
-The prediction is de-normalized using **query's own stats**: `output * stdev_q + means_q`.
+This is the key insight: by avoiding sequence extension entirely, we sidestep all the v1 issues (OOD sequence length, attention dilution, position encoding conflicts, bfloat16 precision loss).
 
 ---
 
@@ -838,38 +707,45 @@ python main.py -mode eval -model OpenCity \
 
 | Risk | Likelihood | Impact | Mitigation |
 |------|-----------|--------|------------|
-| Demo future flow is just averaged out, not useful | Medium | High | Analyze attention weights to verify query attends to demo futures; try demo selection strategies |
-| OOM with K≥3 | Low | Medium | Reduce batch size; use gradient checkpointing (not needed since no training) |
-| Pretrained model can't process extended sequences | Very Low | High | All components verified compatible (Section 4.2) |
-| Demo from different distribution confuses model | Medium | Medium | Demos come from same dataset; instance normalization handles scale differences |
-| Marginal improvement over zero-shot | Medium | High | This validates the approach; if ICT shows any improvement without training, it's scientifically interesting |
+| Residual correction adds noise if demos are dissimilar to query | Medium | Medium | Use demo selection strategies (recent, similar time-of-day) to pick more relevant demos |
+| Random demo selection has high variance | Medium | Low | Average over S independent demo sets (S=10) to reduce variance |
+| Systematic error is not transferable between samples | Medium | High | Core assumption of residual correction — validate empirically across datasets and K values |
+| Marginal improvement over zero-shot | Medium | High | Validates the approach; any improvement without training is scientifically interesting |
+| K+1 forward passes too slow for production | Low | Low | Forward passes are independent and trivially parallelizable |
+
+**Resolved risks (from v1)**:
+- ~~OOM with K≥3~~ → No longer an issue; each call is standard 24-patch size
+- ~~Pretrained model can't process extended sequences~~ → No sequence extension in v2
+- ~~bfloat16 precision loss~~ → fp32 throughout in v2
 
 ---
 
 ## 7. Implementation Priorities
 
-| Priority | Task | Effort | Dependencies |
-|----------|------|--------|-------------|
-| P0 | `OpenCity.forward_ict()` method | 2h | None |
-| P0 | `ICTTrafficDataset` + `define_ict_dataloader` | 2h | None |
-| P0 | `Traffic_model.forward` modification | 15min | forward_ict |
-| P0 | `Trainer.test_ict()` method | 1h | ICTTrafficDataset |
-| P0 | `Run.py` mode='ict' branch | 30min | All above |
-| P1 | `Params_pretrain.py` ICT args | 15min | None |
-| P1 | `conf/ICT/ICT.conf` | 5min | None |
-| P2 | Shape unit tests | 1h | forward_ict |
-| P2 | Regression test (K=0 ≡ forward) | 30min | forward_ict |
-| P3 | Demo selection strategies (recent, similar) | 2h | Basic ICT working |
-| P3 | Attention visualization | 2h | Basic ICT working |
+| Priority | Task | Effort | Dependencies | Status |
+|----------|------|--------|-------------|--------|
+| P0 | `OpenCity.forward_ict()` method | 2h | None | ✅ Done (v2 residual correction) |
+| P0 | `ICTTrafficDataset` + `define_ict_dataloader` | 2h | None | ✅ Done |
+| P0 | `Traffic_model.forward` modification | 15min | forward_ict | ✅ Done |
+| P0 | `Trainer.test_ict()` method | 1h | ICTTrafficDataset | ✅ Done |
+| P0 | `Run.py` mode='ict' branch | 30min | All above | ✅ Done |
+| P1 | `Params_pretrain.py` ICT args | 15min | None | ✅ Done |
+| P1 | `conf/ICT/ICT.conf` | 5min | None | ✅ Done |
+| P2 | E2E validation: Residual K=1 fp32 | 1h | All P0+P1 | 🔄 Pending (Exp 5) |
+| P2 | Multi-K validation: K=3, K=5 | 1h | Exp 5 | Pending (Exp 6) |
+| P2 | Variance reduction: S=10 | 1h | Exp 5 | Pending (Exp 7) |
+| P3 | Demo selection strategies (recent, similar) | 2h | Basic ICT working | Pending |
+| P3 | Full 8-dataset evaluation | 4h | K/S validated | Pending |
 
-**Total estimated effort for P0+P1 (minimum viable)**: ~6 hours
+**P0+P1 completed**. Next: P2 experiments to validate residual correction approach.
 
 ---
 
 ## 8. Future Extensions
 
-1. **Demo Selection Strategies**: Beyond random sampling — temporally recent, spatially similar (DTW-based), or same time-of-day/day-of-week demos could improve performance
-2. **Lightweight Adapter Training**: Add a small trainable adapter layer (LoRA-style) that processes demo context, while keeping the base model frozen — a middle ground between zero-training ICT and full fine-tuning
-3. **Cross-Dataset Demos**: Use demos from pretrained datasets to inform predictions on zero-shot datasets — testing cross-domain transfer
-4. **Attention Analysis**: Visualize TC attention weights to understand how query patches attend to demo history vs. demo future patches — crucial for scientific insight
-5. **Scalability to K>>1**: Implement efficient attention (e.g., FlashAttention) to support more demonstrations
+1. **Demo Selection Strategies**: Beyond random sampling — temporally recent, spatially similar (DTW-based), or same time-of-day/day-of-week demos could improve residual correction accuracy
+2. **Weighted Residual Correction**: Weight each demo's residual by similarity to the query (e.g., cosine similarity of history embeddings) instead of uniform averaging
+3. **Lightweight Adapter Training**: Add a small trainable MLP that learns to combine residuals, while keeping the base model frozen — a middle ground between zero-training ICT and full fine-tuning
+4. **Cross-Dataset Demos**: Use demos from pretrained datasets to inform predictions on zero-shot datasets — testing cross-domain residual transfer
+5. **Node-Specific Correction**: Instead of a global residual, compute per-node residuals using spatially similar nodes from demos
+6. **Hybrid Approach**: Combine residual correction (for bias) with sequence extension (for pattern learning) if residual correction proves effective — use residual as initialization plus fine-tuned attention
