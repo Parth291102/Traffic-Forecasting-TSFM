@@ -223,9 +223,62 @@ python Run.py -mode pretrain -model OpenCity -save_pretrain_path OpenCity-mini2.
 
 * **Preparing Checkpoints of OpenCity**. You can download our model using the following link: [OpenCity-Plus](https://huggingface.co/hkuds/OpenCity-Plus/tree/main), [OpenCity-Base](https://huggingface.co/hkuds/OpenCity-Base/tree/main), [OpenCity-Mini](https://huggingface.co/hkuds/OpenCity-Mini/tree/main)
 
-* **Running Evaluation of OpenCity**. You can use our release model weights to evaluate, There is an example as below: 
+#### ⚠️ Important: Configure `pretrain.conf` Before Evaluation
+
+Before running `test`, `eval`, or `ori` mode, you **must manually edit** `conf/general_conf/pretrain.conf` to set the correct `dataset_use`, `val_ratio`, and `test_ratio` for your target dataset. Different datasets require different split ratios to match the paper's experimental setup.
+
+**Step 1**: Set `dataset_use` to a **single dataset** (evaluation should run one dataset at a time):
+```ini
+dataset_use = ['PEMS07M']
 ```
-# Use OpenCity-plus to evaluate, please use only one dataset to test (e.g. dataset_use = ['PEMS07M'] in pretrain.config).
+
+**Step 2**: Set `val_ratio` and `test_ratio` according to the dataset category:
+
+| Category | Datasets | val_ratio | test_ratio | Train/Val/Test |
+|----------|----------|-----------|------------|----------------|
+| **Zero-shot** | CAD3, CAD5, PEMS07M, TrafficSH | 0.1 | 0.4 | 50%/10%/40% |
+| **Zero-shot** | CHI_TAXI, NYC_BIKE-3 | 0.2 | 0.6 | 20%/20%/60% |
+| **Fast Adaptation** | CD_DIDI, SZ_DIDI | 0.1 | 0.4 | 50%/10%/40% |
+| **Supervised (in pretrain)** | PEMS_BAY | 0.1 | 0.4 | 50%/10%/40% |
+| **Supervised (in pretrain)** | CAD8-1, CAD8-2, CAD12-2 | 0.1 | 0.1 | 80%/10%/10% |
+| **Supervised (in pretrain)** | PEMS04, PEMS08, METR_LA, CAD4-*, CAD7-*, CAD12-1, TrafficHZ, TrafficZZ, TrafficCD, TrafficJN | 0.1 | 0.4 | 50%/10%/40% |
+
+> **Note**: NYC_TAXI uses a custom date-based split (2016–2020 train, Jan–Feb 2021 val, Mar–Dec 2021 test) which is handled internally in `data_process.py`. Set `val_ratio = 0.028` and `test_ratio = 0.139` as approximations, or use the default code logic.
+
+#### Available Datasets
+
+| Dataset | Nodes | Interval | Data Category |
+|---------|-------|----------|---------------|
+| PEMS04 | 307 | 5 min | Traffic Flow |
+| PEMS08 | 170 | 5 min | Traffic Flow |
+| PEMS07M | 228 | 5 min | Traffic Flow |
+| PEMS_BAY | 325 | 5 min | Traffic Speed |
+| METR_LA | 207 | 5 min | Traffic Speed |
+| CAD3 | 480 | 5 min | CA Highway Flow |
+| CAD4-1/2/3/4 | 621/610/593/528 | 5 min | CA Highway Flow |
+| CAD5 | 211 | 5 min | CA Highway Flow |
+| CAD7-1/2/3 | 666/634/559 | 5 min | CA Highway Flow |
+| CAD8-1/2 | 510/512 | 5 min | CA Highway Flow |
+| CAD12-1/2 | 453/500 | 5 min | CA Highway Flow |
+| NYC_TAXI | 263 | 30 min | Taxi Demand |
+| CHI_TAXI | 77 | 30 min | Taxi Demand |
+| NYC_BIKE-3 | 540 | 30 min | Bicycle Trajectories |
+| CD_DIDI | 524 | 10 min | Ride-hailing Demand |
+| SZ_DIDI | 627 | 10 min | Ride-hailing Demand |
+| TrafficHZ/ZZ/CD/JN | 672/676/728/576 | 30 min | Traffic Index |
+| TrafficSH | 896 | 30 min | Traffic Index |
+
+#### 4.1 Zero-shot Evaluation (`test` mode)
+
+Directly evaluate a pretrained model on a dataset **without any training**. This is used for both in-pretrain datasets (supervised evaluation) and out-of-pretrain datasets (zero-shot evaluation).
+
+```bash
+# First, edit pretrain.conf:
+#   dataset_use = ['PEMS07M']
+#   val_ratio = 0.1
+#   test_ratio = 0.4
+
+# Use OpenCity-plus to evaluate
 python Run.py -mode test -model OpenCity -load_pretrain_path OpenCity-plus.pth -batch_size 2 --embed_dim 512 --skip_dim 512 --enc_depth 6
 
 # Use OpenCity-base to evaluate
@@ -235,12 +288,49 @@ python Run.py -mode test -model OpenCity -load_pretrain_path OpenCity-base.pth -
 python Run.py -mode test -model OpenCity -load_pretrain_path OpenCity-mini.pth -batch_size 2 --embed_dim 128 --skip_dim 128 --enc_depth 3
 ```
 
-* **Running Evaluation of other baselines**. You can Replace the model name or use ori mode to train and test. For example: 
+#### 4.2 Fast Adaptation / Efficient Fine-tuning (`eval` mode)
 
+Load a pretrained model, **freeze all backbone parameters**, and only fine-tune the **prediction head** (the last linear layer) for a few epochs. This is used for fast adaptation to unseen data categories (e.g., CD_DIDI, SZ_DIDI which are traffic index data not seen during pretraining).
+
+```bash
+# First, edit pretrain.conf:
+#   dataset_use = ['CD_DIDI']
+#   val_ratio = 0.1
+#   test_ratio = 0.4
+#   epochs = 3          (fast adaptation uses only 3 epochs)
+#   batch_size = 64
+
+# Fast Adaptation with OpenCity-plus
+python Run.py -mode eval -model OpenCity -load_pretrain_path OpenCity-plus.pth -batch_size 64 -epochs 3 --embed_dim 512 --skip_dim 512 --enc_depth 6
 ```
-# Run STGCN in ori mode
-python Run.py -mode ori -model STGCN -batch_size 64 --real_value False
+
+> **What `eval` mode does**: Loads pretrained weights → freezes all parameters → unfreezes only `model.predictor.linear` (the prediction head) → trains for the specified number of epochs with early stopping.
+
+#### 4.3 Supervised Training from Scratch (`ori` mode)
+
+Train a model from scratch on a single dataset with full train/val/test split and early stopping. Used for baseline comparisons.
+
+```bash
+# First, edit pretrain.conf:
+#   dataset_use = ['CD_DIDI']
+#   val_ratio = 0.1
+#   test_ratio = 0.4
+
+# Run STGCN baseline (100 epochs, early stop after 15)
+python Run.py -mode ori -model STGCN -batch_size 64 -epochs 100 -early_stop True -early_stop_patience 15 --real_value False
+
+# Run OpenCity from scratch (for comparison)
+python Run.py -mode ori -model OpenCity -batch_size 8 --embed_dim 256 --skip_dim 256 --enc_depth 3
 ```
+
+#### Summary of Modes
+
+| Mode | Description | Parameters Updated | Typical Use Case |
+|------|-------------|-------------------|-----------------|
+| `pretrain` | Multi-dataset joint pretraining | All | Building the foundation model |
+| `test` | Pure inference, no training | None | Zero-shot & supervised evaluation |
+| `eval` | Efficient fine-tuning | Prediction head only (`linear` layer) | Fast adaptation to unseen data |
+| `ori` | Full supervised training | All | Baseline comparisons |
 
 <!--
 ## Contact
