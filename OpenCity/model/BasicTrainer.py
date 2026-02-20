@@ -176,3 +176,95 @@ class Trainer(object):
 
         logger.info("Average Horizon, MAE: {:.2f}, RMSE: {:.2f}, MAPE: {:.4f}%, CORR:{:.4f}".format(
             mae, rmse, mape * 100, corr))
+    @staticmethod
+    def test_ict(model, args, scaler_dict, test_dataloader, logger, path=None,
+                 num_prefix_selections=1):
+        """
+        ICT inference: pure forward pass with demonstrations, no gradient updates.
+
+        Args:
+            num_prefix_selections: number of random demo sets (S) to average over
+                                   (reduces variance from demo selection)
+        """
+        # Load pretrained weights
+        if path is not None:
+            if torch.cuda.device_count() > 1:
+                model.load_state_dict(torch.load(path))
+            else:
+                model_weights = {k.replace('module.', ''): v for k, v in torch.load(path).items()}
+                model.load_state_dict(model_weights)
+            model.to(args.device)
+
+        model.eval()
+        for param in model.parameters():
+            param.requires_grad = False
+
+        # Determine autocast dtype for memory optimization
+        # Use bfloat16: same dynamic range as float32, avoids NaN overflow
+        use_amp = torch.cuda.is_available()
+        amp_dtype = torch.bfloat16
+
+        with torch.no_grad():
+            mae = 0
+            rmse = 0
+            mape = 0
+            total_count = 0
+            total_mape_count = 0
+            total_batch = 0
+
+            for batch_data in test_dataloader:
+                inputs, targets, demos_x, demos_y = batch_data
+                inputs = inputs.squeeze(0).to(args.device)      # [B, T, N, F]
+                targets = targets.squeeze(0).to(args.device)     # [B, T, N, F]
+                demos_x = demos_x.squeeze(0).to(args.device)    # [B, S, K, T, N, F]
+                demos_y = demos_y.squeeze(0).to(args.device)    # [B, S, K, T, N, F]
+
+                # Convert inputs to model's dtype (float16 if model.half() was called)
+                model_dtype = next(model.parameters()).dtype
+                inputs_m = inputs.to(model_dtype)
+                targets_m = targets.to(model_dtype)
+                demos_x_m = demos_x.to(model_dtype)
+                demos_y_m = demos_y.to(model_dtype)
+
+                select_dataset = get_key_from_value(args.num_nodes_dict, inputs.shape[2])
+                S = demos_x_m.shape[1]
+
+                # Average predictions over S independent demo selections
+                outputs = []
+                for s in range(S):
+                    with torch.autocast(device_type='cuda', dtype=amp_dtype, enabled=use_amp):
+                        output_s = model(inputs_m, targets_m, select_dataset,
+                                         demos_x=demos_x_m[:, s],    # [B, K, T, N, F]
+                                         demos_y=demos_y_m[:, s])     # [B, K, T, N, F]
+                    outputs.append(output_s.float())  # cast back to float32 for metrics
+                output = torch.stack(outputs).mean(dim=0)        # [B, T, N, 1]
+
+                if args.real_value == False:
+                    output = scaler_dict[select_dataset].inverse_transform(output)
+                    y_lbl = scaler_dict[select_dataset].inverse_transform(targets[..., :args.output_dim])
+                else:
+                    y_lbl = targets[..., :args.output_dim]
+
+                batch_mae, batch_rmse, batch_mape, batch_mse, corr, mae_count, rmse_count, mse_count, mape_count = \
+                    All_Metrics(output, y_lbl, args.mae_thresh, args.mape_thresh)
+                mae += batch_mae * mae_count
+                rmse += batch_mse * rmse_count
+                mape += batch_mape * mape_count
+                total_count += mae_count
+                total_mape_count += mape_count
+                total_batch += len(y_lbl)
+                print(f'[ICT] batch {total_batch}, MAE: {batch_mae:.4f}, RMSE: {batch_rmse:.4f}, MAPE: {batch_mape:.4f}')
+
+                # Free GPU memory between batches
+                del demos_x, demos_y, demos_x_m, demos_y_m, outputs, inputs_m, targets_m
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
+
+        mae /= total_count
+        rmse = (rmse / total_count) ** 0.5
+        mape /= total_mape_count
+        print('last batch', output.shape, y_lbl.shape)
+        print(total_batch, total_count, total_mape_count)
+
+        logger.info("ICT Test — MAE: {:.2f}, RMSE: {:.2f}, MAPE: {:.4f}%, CORR: {:.4f}".format(
+            mae, rmse, mape * 100, corr))

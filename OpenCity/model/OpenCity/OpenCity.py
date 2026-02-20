@@ -188,7 +188,7 @@ class TemporalSelfAttention(nn.Module):
 
         self.proj_drop = nn.Dropout(proj_drop)
 
-    def forward(self, x_q, x_k, x_v, TH, TP, adj, geo_mask=None, sem_mask=None, trg_mask=False):
+    def forward(self, x_q, x_k, x_v, TH, TP, adj, geo_mask=None, sem_mask=None, trg_mask=False, t_attn_mask=None):
         B, T_q, N, D = x_q.shape
         T_k, T_v = x_k.shape[1], x_v.shape[1]
 
@@ -217,6 +217,9 @@ class TemporalSelfAttention(nn.Module):
         t_v = t_v.reshape(B, N, T_v, self.t_num_heads, self.head_dim).permute(0, 1, 3, 2, 4)
 
         t_attn = (t_q @ t_k.transpose(-2, -1)) * self.scale
+        if t_attn_mask is not None:
+            # t_attn: [B, N, H, T_q, T_k], t_attn_mask: [T_q, T_k] (True=attend)
+            t_attn = t_attn.masked_fill(~t_attn_mask.unsqueeze(0).unsqueeze(0).unsqueeze(0), -1e9)
         if trg_mask:
             ones = torch.ones_like(t_attn).to(self.device)
             dec_mask = torch.triu(ones, diagonal=1)
@@ -246,16 +249,16 @@ class STEncoderBlock(nn.Module):
         mlp_hidden_dim = int(dim * mlp_ratio)
         self.mlp = FeedForward(hidden_size=dim, intermediate_size=mlp_hidden_dim)
 
-    def forward(self, x, dec_in, enc_out, TH, TP, adj, geo_mask=None, sem_mask=None):
+    def forward(self, x, dec_in, enc_out, TH, TP, adj, geo_mask=None, sem_mask=None, t_attn_mask=None):
         if self.type_ln == 'pre':
             x_nor1 = self.norm1(x)
-            x = x + self.drop_path(self.st_attn(x_nor1, x_nor1, x_nor1, TH, TP, adj, geo_mask=geo_mask, sem_mask=sem_mask))
+            x = x + self.drop_path(self.st_attn(x_nor1, x_nor1, x_nor1, TH, TP, adj, geo_mask=geo_mask, sem_mask=sem_mask, t_attn_mask=t_attn_mask))
             x = x + self.drop_path(self.mlp(self.norm2(x)))
         elif self.type_ln == 'post':
-            x = self.norm1((x + self.drop_path(self.st_attn(x, x, x, TH, TP, adj, geo_mask=geo_mask, sem_mask=sem_mask))))
+            x = self.norm1((x + self.drop_path(self.st_attn(x, x, x, TH, TP, adj, geo_mask=geo_mask, sem_mask=sem_mask, t_attn_mask=t_attn_mask))))
             x = self.norm2((x + self.drop_path(self.mlp(x))))
         else:
-            x = x + self.drop_path(self.st_attn(x, x, x, TH, TP, adj, geo_mask=geo_mask, sem_mask=sem_mask))
+            x = x + self.drop_path(self.st_attn(x, x, x, TH, TP, adj, geo_mask=geo_mask, sem_mask=sem_mask, t_attn_mask=t_attn_mask))
             x = x + self.drop_path(self.mlp(self.norm2(x)))
         return x
 
@@ -358,5 +361,166 @@ class OpenCity(nn.Module):
         # DeIN
         skip = skip * stdev
         skip = skip + means
+
+        return skip
+
+    def forward_ict(self, input, lbls, demos_x, demos_y, select_dataset):
+        """
+        ICT forward pass: process query with K demonstrations as context.
+
+        Args:
+            input:   [B, T, N, F]   — query history
+            lbls:    [B, T, N, F]   — query future (only temporal features used)
+            demos_x: [B, K, T, N, F] — demonstration histories
+            demos_y: [B, K, T, N, F] — demonstration futures (ground-truth flow + temporal)
+            select_dataset: str — dataset identifier
+
+        Returns:
+            [B, T, N, 1] — predicted future flow for query
+        """
+        bs, time_steps, num_nodes, num_feas = input.size()
+        K = demos_x.shape[1]
+        assert demos_x.dim() == 5, f"demos_x must be [B, K, T, N, F], got {demos_x.shape}"
+        assert demos_x.shape[0] == bs, f"demo batch size mismatch: {demos_x.shape[0]} vs {bs}"
+
+        # ===== K=0 fallback: identical to forward() =====
+        if K == 0:
+            return self.forward(input, lbls, select_dataset)
+
+        # ===== QUERY PROCESSING (same as forward) =====
+
+        # Query temporal context
+        query_TCH = input[..., self.output_dim:].long()      # [B, T, N, 2]
+        query_TCP = lbls[..., self.output_dim:].long()        # [B, T, N, 2]
+        query_TH, query_TP = self.patch_embedding_time(
+            torch.cat([query_TCH, query_TCP], dim=-1)         # [B, T, N, 4]
+        )  # Both: [B, 24, N, D]
+
+        # Spatial PE — broadcast shape [1, 1, N, D]
+        spa_feas = self.spatial_embedding(
+            self.lap_mx_dict[select_dataset].to(self.device).to(input.dtype)
+        )  # [1, 1, N, D]
+
+        query_TH = query_TH + spa_feas
+        query_TP = query_TP + spa_feas
+
+        # Query Instance Normalization
+        query_flow = input[..., :self.output_dim]             # [B, T, N, 1]
+        query_means = query_flow.mean(1, keepdim=True).detach()
+        query_centered = query_flow - query_means
+        query_stdev = torch.sqrt(
+            torch.var(query_centered, dim=1, keepdim=True, unbiased=False) + 1e-5
+        ).detach()
+        query_normed = query_centered / query_stdev           # [B, T, N, 1]
+
+        # Query patch embedding
+        query_enc = self.patch_embedding_flow(query_normed)   # [B, 24, N, D]
+
+        # ===== DEMONSTRATION PROCESSING =====
+
+        all_demo_enc = []      # List of [B, 48, N, D] — one per demo
+        all_demo_TH = []       # temporal keys for each demo
+        all_demo_TP = []       # cached dk_TP to avoid recomputation
+
+        for k in range(K):
+            dk_x = demos_x[:, k]  # [B, T, N, F]
+            dk_y = demos_y[:, k]  # [B, T, N, F]
+
+            # Demo temporal context
+            dk_TCH = dk_x[..., self.output_dim:].long()
+            dk_TCP = dk_y[..., self.output_dim:].long()
+            dk_TH, dk_TP = self.patch_embedding_time(
+                torch.cat([dk_TCH, dk_TCP], dim=-1)
+            )  # Both: [B, 24, N, D]
+            dk_TH = dk_TH + spa_feas
+            dk_TP = dk_TP + spa_feas
+
+            # Demo Instance Normalization (based on demo's own history)
+            dk_hist_flow = dk_x[..., :self.output_dim]       # [B, T, N, 1]
+            dk_futu_flow = dk_y[..., :self.output_dim]       # [B, T, N, 1]
+            dk_means = dk_hist_flow.mean(1, keepdim=True).detach()
+            dk_centered = dk_hist_flow - dk_means
+            dk_stdev = torch.sqrt(
+                torch.var(dk_centered, dim=1, keepdim=True, unbiased=False) + 1e-5
+            ).detach()
+            dk_hist_normed = dk_centered / dk_stdev
+            dk_futu_normed = (dk_futu_flow - dk_means) / dk_stdev
+
+            # Demo patch embeddings
+            dk_hist_enc = self.patch_embedding_flow(dk_hist_normed)  # [B, 24, N, D]
+            dk_futu_enc = self.patch_embedding_flow(dk_futu_normed)  # [B, 24, N, D]
+
+            # Concatenate demo history + future patches
+            dk_enc = torch.cat([dk_hist_enc, dk_futu_enc], dim=1)   # [B, 48, N, D]
+            dk_th_full = torch.cat([dk_TH, dk_TP], dim=1)           # [B, 48, N, D]
+
+            all_demo_enc.append(dk_enc)
+            all_demo_TH.append(dk_th_full)
+            all_demo_TP.append(dk_TP)  # Cache dk_TP for TP_all construction
+
+        # ===== CONCATENATE: demos + query =====
+
+        # Encoder input: [demo1(48)] [demo2(48)] ... [demoK(48)] [query(24)]
+        enc_all = torch.cat(all_demo_enc + [query_enc], dim=1)   # [B, K*48+24, N, D]
+        del all_demo_enc, query_enc  # free memory
+        assert enc_all.shape[1] == K * 48 + 24, \
+            f"enc_all T-dim: expected {K*48+24}, got {enc_all.shape[1]}"
+
+        # TH for all positions (used as KEY in TC attention)
+        TH_all = torch.cat(all_demo_TH + [query_TH], dim=1)      # [B, K*48+24, N, D]
+        del all_demo_TH, query_TH  # free memory
+
+        # TP for all positions (used as QUERY in TC attention)
+        # Demo positions: each demo's TP repeated for hist+future patches
+        # Query positions: use query_TP
+        all_demo_TP_full = [
+            torch.cat([dk_TP, dk_TP], dim=1)  # [B, 48, N, D]
+            for dk_TP in all_demo_TP
+        ]
+        del all_demo_TP  # free memory
+        TP_all = torch.cat(all_demo_TP_full + [query_TP], dim=1)  # [B, K*48+24, N, D]
+        del all_demo_TP_full, query_TP  # free memory
+
+        # ===== BUILD BLOCK-DIAGONAL ATTENTION MASK =====
+        # Each 24-patch segment only attends to itself in T self-attention.
+        # This preserves the pretrained 24×24 attention pattern.
+        # TC cross-attention remains unrestricted (handles cross-segment info flow).
+        L = K * 48 + 24  # total patches
+        seg_size = 24
+        num_segments = L // seg_size
+        t_attn_mask = torch.zeros(L, L, dtype=torch.bool, device=self.device)
+        for seg in range(num_segments):
+            start = seg * seg_size
+            end = start + seg_size
+            t_attn_mask[start:end, start:end] = True
+
+        # ===== ENCODER BLOCKS =====
+
+        adj = self.adj_mx_dict[select_dataset].to(self.device).to(enc_all.dtype)
+        geo_mask = self.geo_mask_dict[select_dataset].to(self.device)
+
+        for encoder_block in self.encoder_blocks:
+            enc_all = encoder_block(
+                enc_all, enc_all, enc_all,
+                TH_all, TP_all, adj, geo_mask, self.sem_mask,
+                t_attn_mask=t_attn_mask
+            )
+        # enc_all: [B, K*48+24, N, D]
+
+        # ===== EXTRACT QUERY PATCHES & PREDICT =====
+
+        query_out = enc_all[:, -24:, :, :]  # Last 24 patches = query
+        assert query_out.shape[1] == 24, \
+            f"query_out T-dim: expected 24, got {query_out.shape[1]}"
+
+        skip = query_out.permute(0, 2, 3, 1).contiguous()  # [B, N, D, 24]
+        skip = self.flatten(skip)                            # [B, N, D*24]
+        skip = self.linear(skip)                             # [B, N, output_window]
+        skip = skip.transpose(1, 2).unsqueeze(-1)            # [B, T, N, 1]
+        skip = skip[:, :time_steps, :, :]
+
+        # De-Instance-Normalization (using query's own stats)
+        skip = skip * query_stdev
+        skip = skip + query_means
 
         return skip

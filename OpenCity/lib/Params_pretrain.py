@@ -63,5 +63,12 @@ def parse_args(device):
     args.add_argument('-log_dir', default='./', type=str)
     args.add_argument('-log_step', default=config['log']['log_step'], type=int)
     args.add_argument('-save_step', default=config['log']['save_step'], type=int)
+    # ICT parameters
+    args.add_argument('-num_demonstrations', default=1, type=int,
+                      help='Number of demonstration pairs (K) for ICT')
+    args.add_argument('-num_prefix_selections', default=1, type=int,
+                      help='Number of independent demo sets (S) to average at test time')
+    args.add_argument('-demo_selection', default='random', type=str,
+                      help='Demo selection strategy: random, recent, similar')
     args, _ = args.parse_known_args()
     return args

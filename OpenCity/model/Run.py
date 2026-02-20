@@ -150,5 +150,36 @@ elif args.mode == 'test':
     print_model_parameters(model, only_num=False)
     print("Load saved model")
     trainer.test(model, trainer.args, scaler_dict, test_dataloader, trainer.logger, path=log_dir + '/' + args.load_pretrain_path)
+elif args.mode == 'ict':
+    from lib.ict_data_process import define_ict_dataloader
+
+    # Load pretrained model
+    path = log_dir + '/' + args.load_pretrain_path
+    if torch.cuda.device_count() > 1:
+        model.load_state_dict(torch.load(path))
+    else:
+        model_weights = {k.replace('module.', ''): v for k, v in torch.load(path).items()}
+        model.load_state_dict(model_weights)
+    print("Loaded pretrained model for ICT inference")
+
+    # Freeze all parameters (zero-training)
+    for param in model.parameters():
+        param.requires_grad = False
+
+    # Convert model to bfloat16 for memory efficiency
+    # bfloat16 has same dynamic range as float32 (avoids NaN overflow that float16 causes)
+    # ICT extends sequence length 3x per demo, so memory saving is critical
+    model.bfloat16()
+    print("Converted model to bfloat16 for memory-efficient ICT inference")
+    print_model_parameters(model, only_num=False)
+
+    # Create ICT dataloaders
+    _, _, test_dataloader_ict, scaler_dict_ict = define_ict_dataloader(args)
+
+    # Run ICT test
+    trainer.test_ict(
+        model, args, scaler_dict_ict, test_dataloader_ict, trainer.logger,
+        num_prefix_selections=args.num_prefix_selections
+    )
 else:
     raise ValueError
