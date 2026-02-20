@@ -170,22 +170,60 @@ https://github.com/user-attachments/assets/39265dc5-0126-483b-951e-518c6cb210e0
 <span id='Environment'/>
 
 ### 2.Environment <a href='#all_catelogue'>[Back to Top]</a>
-Please first clone the repo and install the required environment, which can be done by running the following commands:
+
+We use [uv](https://docs.astral.sh/uv/) to manage the Python environment and dependencies. All dependencies (including PyTorch with CUDA 12.4) are declared in `pyproject.toml`.
+
+#### Quick Start
+
+```shell
+# Install uv (if not already installed)
+curl -LsSf https://astral.sh/uv/install.sh | sh
+
+# Clone the repo
+git clone https://github.com/HKUDS/OpenCity.git
+cd OpenCity
+
+# Install all dependencies (Python 3.9, PyTorch 2.4.1+cu124, etc.)
+uv sync
+```
+
+That's it. `uv sync` will automatically:
+1. Create a virtual environment with Python 3.9
+2. Install PyTorch 2.4.1 + CUDA 12.4 (from the PyTorch wheel index)
+3. Install all other dependencies (numpy, scipy, pandas, tqdm, fastdtw, tslearn, h5py, etc.)
+
+#### Running Commands
+
+Use `uv run` to execute scripts within the managed environment:
+
+```shell
+# Instead of: python Run.py ...
+uv run python Run.py -mode test -model OpenCity ...
+```
+
+Or activate the virtual environment first:
+
+```shell
+source .venv/bin/activate
+python Run.py -mode test -model OpenCity ...
+```
+
+#### Adding New Dependencies
+
+```shell
+uv add <package-name>
+```
+
+<details>
+<summary><b>Alternative: conda/pip setup (legacy)</b></summary>
+
 ```shell
 conda create -n opencity python=3.9.13
-
 conda activate opencity
-
-# Torch (other versions are also ok)
-pip install torch==1.9.0+cu111 torchvision==0.10.0+cu111 torchaudio==0.9.0 -f https://download.pytorch.org/whl/torch_stable.html
-
-# Clone our OpenCity or download it
-git clone https://github.com/HKUDS/OpenCity.git
-cd OpenCity-main
-
-# Install required libraries
+pip install torch==2.4.1+cu124 torchvision==0.19.1+cu124 torchaudio==2.4.1+cu124 -f https://download.pytorch.org/whl/cu124/torch_stable.html
 pip install -r requirements.txt
 ```
+</details>
 
 <span id='Training OpenCity'/>
 
