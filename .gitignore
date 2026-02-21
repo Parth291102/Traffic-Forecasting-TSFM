@@ -21,21 +21,8 @@ venv/
 .python-version
 uv.lock
 
-# ============ Data & Model Weights (too large for git) ============ #
-# Download from HuggingFace instead
-*/data/CAD*/
-*/data/PEMS*/
-*/data/METR_LA/
-*/data/NYC_*/
-*/data/CHI_TAXI/
-*/data/CD_DIDI/
-*/data/SZ_DIDI/
-*/data/Traffic*/
-*/data/OpenCity/
-*/data/*.h5
-*/data/*.npy
-*/data/*.csv
-*/model_weights/OpenCity/*.pth
+# ============ Data & Model Weights (tracked via Git LFS) ============ #
+# .npy, .npz, .pth files are tracked by Git LFS (see .gitattributes)
 
 # ============ IDE & OS ============ #
 .vscode/
