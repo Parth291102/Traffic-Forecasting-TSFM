@@ -180,9 +180,9 @@ We use [uv](https://docs.astral.sh/uv/) to manage the Python environment and dep
 #### Quick Start
 
 ```shell
-# Step 1: Clone the repo and enter the project directory
-git clone https://github.com/HKUDS/OpenCity.git
-cd OpenCity
+# Step 1: Clone the repo and enter the OpenCity project directory
+git clone -b xzhou38 https://github.com/Parth291102/Traffic-Forecasting-TSFM.git
+cd Traffic-Forecasting-TSFM/OpenCity
 # ⚠️  All subsequent commands in this guide must be run from this directory.
 #     Verify before proceeding:
 pwd   # should end with /OpenCity
