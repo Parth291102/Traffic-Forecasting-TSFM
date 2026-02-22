@@ -8,6 +8,7 @@ import torch
 import numpy as np
 import random
 from torch.utils.data import Dataset, DataLoader, ConcatDataset
+from sklearn.neighbors import NearestNeighbors
 
 # Reuse helpers already in data_process.py
 from lib.data_process import (
@@ -78,6 +79,43 @@ class ICTTrafficDataset(Dataset):
             for i in range(0, len(self.windows), batch_size)
         ]
 
+        # Build KNN index from demo_pool
+        self._build_knn_index()
+
+    def _build_knn_index(self):
+        """Build KNN index from demo pool for efficient nearest neighbor search."""
+        # Flatten each demonstration window to a 1D vector
+        demo_vectors = []
+        for x_np, y_np in self.demo_pool:
+            # Flatten [T, N, F] -> 1D vector
+            flattened = np.concatenate([x_np.flatten(), y_np.flatten()])
+            demo_vectors.append(flattened)
+        
+        self.demo_vectors = np.array(demo_vectors)
+        
+        # Build KNN index with k+1 (to exclude the query itself if it's in the pool)
+        self.knn_model = NearestNeighbors(
+            n_neighbors=min(self.num_demonstrations + 1, len(self.demo_pool)),
+            algorithm='auto'
+        )
+        self.knn_model.fit(self.demo_vectors)
+
+    def _get_knn_demonstrations(self, query_x, k):
+        """Find K nearest neighbors to query_x using KNN."""
+        # Flatten query [T, N, F] -> 1D vector
+        query_vector = query_x.flatten()
+        
+        # Find K+1 nearest neighbors (to handle self-inclusion)
+        distances, indices = self.knn_model.kneighbors(
+            query_vector.reshape(1, -1),
+            n_neighbors=min(k + 1, len(self.demo_pool))
+        )
+        
+        # Take top K (skip first if it's identical to query)
+        knn_indices = indices[0][:k]
+        
+        return knn_indices
+
     def __getitem__(self, idx):
         batch_pairs = self.batches[idx]
         batch_x, batch_y = zip(*batch_pairs)
@@ -88,14 +126,15 @@ class ICTTrafficDataset(Dataset):
         K = self.num_demonstrations
         S = self.num_prefix_selections
 
-        # Sample S independent sets of K demonstrations for each query
+        # Sample S independent sets of K demonstrations using KNN for each query
         demos_x_list, demos_y_list = [], []
         for b in range(B):
             sets_x, sets_y = [], []
             for s in range(S):
-                indices = random.sample(range(len(self.demo_pool)), K)
-                dx = np.stack([self.demo_pool[i][0] for i in indices])  # [K, T, N, F]
-                dy = np.stack([self.demo_pool[i][1] for i in indices])  # [K, T, N, F]
+                # Use KNN to find K nearest demonstrations to this query
+                knn_indices = self._get_knn_demonstrations(batch_x[b].numpy(), K)
+                dx = np.stack([self.demo_pool[i][0] for i in knn_indices])  # [K, T, N, F]
+                dy = np.stack([self.demo_pool[i][1] for i in knn_indices])  # [K, T, N, F]
                 sets_x.append(dx)
                 sets_y.append(dy)
             demos_x_list.append(np.stack(sets_x))  # [S, K, T, N, F]
