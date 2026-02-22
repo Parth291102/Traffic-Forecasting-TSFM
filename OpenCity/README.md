@@ -187,19 +187,24 @@ cd OpenCity
 #     Verify before proceeding:
 pwd   # should end with /OpenCity
 
-# Step 2: Install uv into the project's own bin/ directory
+# Step 2: Pull LFS-tracked files (model weights, adjacency matrices, etc.)
+#   The repo uses Git LFS for large binary files (.npy, .pth, .npz).
+#   Without this step those files contain only LFS pointer text, not real data.
+git lfs pull
+
+# Step 3: Install uv into the project's own bin/ directory
 #   UV_INSTALL_DIR pins uv to the repo root so it is self-contained
 #   and independent from any system-wide or user-wide uv installation.
 curl -LsSf https://astral.sh/uv/install.sh | UV_INSTALL_DIR="$(pwd)/bin" sh
 
-# Step 3: Add the local bin/ to PATH for the current shell session
+# Step 4: Add the local bin/ to PATH for the current shell session
 export PATH="$(pwd)/bin:$PATH"
 
 # To persist across sessions you can add the absolute path to your shell profile:
 # echo 'export PATH="/absolute/path/to/OpenCity/bin:$PATH"' >> ~/.bashrc   # bash
 # echo 'export PATH="/absolute/path/to/OpenCity/bin:$PATH"' >> ~/.zshrc    # zsh
 
-# Step 4: Install all dependencies (Python 3.9, PyTorch 2.4.1+cu124, etc.)
+# Step 5: Install all dependencies (Python 3.9, PyTorch 2.4.1+cu124, etc.)
 uv sync
 ```
 

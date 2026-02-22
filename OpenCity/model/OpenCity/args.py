@@ -22,7 +22,7 @@ def load_rel_2(adj_mx, args, dataset):
             sh_mx[sh_mx > 0] = 1
             sh_mx[sh_mx == 0] = 511
             np.save(cache_path, sh_mx)
-        sh_mx = np.load(cache_path)
+        sh_mx = np.load(cache_path, allow_pickle=True)
     return sh_mx
 
 def parse_args(parser, args_base):
@@ -75,7 +75,7 @@ def parse_args(parser, args_base):
                 num_of_vertices=args_base.num_nodes_dict[dataset_select])
             A = A + np.eye(A.shape[0])
         else:
-            A = np.load(args_predictor.filepath + f'{dataset_select}_rn_adj.npy')
+            A = np.load(args_predictor.filepath + f'{dataset_select}_rn_adj.npy', allow_pickle=True)
         sh_mx_dict[dataset_select] = torch.FloatTensor(load_rel_2(A, args_predictor, dataset_select))
         lpls_dict[dataset_select] = torch.FloatTensor(cal_lape(copy.deepcopy(A)))
         d = np.sum(A, axis=1)
