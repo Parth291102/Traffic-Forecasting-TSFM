@@ -22,11 +22,9 @@ venv/
 uv.lock
 
 # ============ Data files (large, download from HuggingFace) ============ #
-OpenCity/data/**/*.npy
-OpenCity/data/**/*.npz
-OpenCity/data/**/*.h5
-OpenCity/data/ca_meta.csv
-OpenCity/data/OpenCity/
+OpenCity/data/*
+!OpenCity/data/generate_ca_data.py
+!OpenCity/data/README.md
 In-context/example/**/*.pkl
 In-context/example_data/*.pkl
 
