@@ -75,6 +75,10 @@ https://github.com/user-attachments/assets/39265dc5-0126-483b-951e-518c6cb210e0
   * <a href='#Preparing Pre-trained Data'>3.1. Preparing Pre-trained Data </a>
   * <a href='#Pre-training'>3.2. Pre-training </a>
 * <a href='#Evaluating'>4. Evaluating </a>
+  * <a href='#Zero-shot'>4.1. Zero-shot Evaluation (`test` mode)</a>
+  * <a href='#Fast-Adaptation'>4.2. Fast Adaptation (`eval` mode)</a>
+  * <a href='#Supervised'>4.3. Supervised Training from Scratch (`ori` mode)</a>
+  * <a href='#ICT'>4.4. In-Context Traffic Forecasting (`ict` mode)</a>
 ****
 
 
@@ -176,36 +180,72 @@ We use [uv](https://docs.astral.sh/uv/) to manage the Python environment and dep
 #### Quick Start
 
 ```shell
-# Install uv (if not already installed)
-curl -LsSf https://astral.sh/uv/install.sh | sh
-
-# Clone the repo
+# Step 1: Clone the repo and enter the project directory
 git clone https://github.com/HKUDS/OpenCity.git
 cd OpenCity
+# ⚠️  All subsequent commands in this guide must be run from this directory.
+#     Verify before proceeding:
+pwd   # should end with /OpenCity
 
-# Install all dependencies (Python 3.9, PyTorch 2.4.1+cu124, etc.)
+# Step 2: Install uv into the project's own bin/ directory
+#   UV_INSTALL_DIR pins uv to the repo root so it is self-contained
+#   and independent from any system-wide or user-wide uv installation.
+curl -LsSf https://astral.sh/uv/install.sh | UV_INSTALL_DIR="$(pwd)/bin" sh
+
+# Step 3: Add the local bin/ to PATH for the current shell session
+export PATH="$(pwd)/bin:$PATH"
+
+# To persist across sessions you can add the absolute path to your shell profile:
+# echo 'export PATH="/absolute/path/to/OpenCity/bin:$PATH"' >> ~/.bashrc   # bash
+# echo 'export PATH="/absolute/path/to/OpenCity/bin:$PATH"' >> ~/.zshrc    # zsh
+
+# Step 4: Install all dependencies (Python 3.9, PyTorch 2.4.1+cu124, etc.)
 uv sync
 ```
 
-That's it. `uv sync` will automatically:
-1. Create a virtual environment with Python 3.9
+`uv sync` will automatically:
+1. Create a virtual environment (`.venv/`) with Python 3.9
 2. Install PyTorch 2.4.1 + CUDA 12.4 (from the PyTorch wheel index)
 3. Install all other dependencies (numpy, scipy, pandas, tqdm, fastdtw, tslearn, h5py, etc.)
 
-#### Running Commands
+#### Re-installing / Updating Dependencies
 
-Use `uv run` to execute scripts within the managed environment:
+If you encounter environment issues or need a clean reinstall:
 
 ```shell
-# Instead of: python Run.py ...
-uv run python Run.py -mode test -model OpenCity ...
+# Force-reinstall all packages from scratch
+uv sync --reinstall
+
+# Or remove the venv entirely and recreate it
+rm -rf .venv && uv sync
 ```
 
-Or activate the virtual environment first:
+#### Running Commands
+
+> **Important**: All `Run.py` commands below must be run from the **`OpenCity/`** project root directory (i.e., the directory containing `Run.py`, `conf/`, `data/`, etc.).
+
+```shell
+cd /path/to/OpenCity   # make sure you are in the project root
+```
+
+Use `uv run` to execute scripts within the managed environment (no manual activation needed):
+
+```shell
+# Zero-shot evaluation example (OpenCity-plus on PEMS07M)
+uv run python model/Run.py -mode test -model OpenCity \
+  -load_pretrain_path OpenCity-plus.pth -batch_size 2 \
+  --embed_dim 512 --skip_dim 512 --enc_depth 6
+```
+
+Or activate the virtual environment first and then run `python` directly:
 
 ```shell
 source .venv/bin/activate
-python Run.py -mode test -model OpenCity ...
+
+# Zero-shot evaluation example (OpenCity-plus on PEMS07M)
+python model/Run.py -mode test -model OpenCity \
+  -load_pretrain_path OpenCity-plus.pth -batch_size 2 \
+  --embed_dim 512 --skip_dim 512 --enc_depth 6
 ```
 
 #### Adding New Dependencies
@@ -240,17 +280,23 @@ pip install -r requirements.txt
 
 #### 3.2. Pre-training <a href='#all_catelogue'>[Back to Top]</a>
 
-* To pretrain the OpenCity model with different configurations, you can execute the Run.py code. There are some examples:
-```
+* To pretrain the OpenCity model with different configurations, you can execute the `Run.py` script from inside the `OpenCity/` directory. There are some examples:
+
+```bash
 # OpenCity-plus
-python Run.py -mode pretrain -model OpenCity -save_pretrain_path OpenCity-plus2.0.pth -batch_size 4 --embed_dim 512 --skip_dim 512 --enc_depth 6
+uv run python model/Run.py -mode pretrain -model OpenCity \
+  -save_pretrain_path OpenCity-plus2.0.pth -batch_size 4 \
+  --embed_dim 512 --skip_dim 512 --enc_depth 6
 
 # OpenCity-base
-python Run.py -mode pretrain -model OpenCity -save_pretrain_path OpenCity-base2.0.pth -batch_size 8 --embed_dim 256 --skip_dim 256 --enc_depth 3
+uv run python model/Run.py -mode pretrain -model OpenCity \
+  -save_pretrain_path OpenCity-base2.0.pth -batch_size 8 \
+  --embed_dim 256 --skip_dim 256 --enc_depth 3
 
 # OpenCity-mini
-python Run.py -mode pretrain -model OpenCity -save_pretrain_path OpenCity-mini2.0.pth -batch_size 16 --embed_dim 128 --skip_dim 128 --enc_depth 3
-
+uv run python model/Run.py -mode pretrain -model OpenCity \
+  -save_pretrain_path OpenCity-mini2.0.pth -batch_size 16 \
+  --embed_dim 128 --skip_dim 128 --enc_depth 3
 ```
 
 * Parameter setting instructions. The parameter settings consist of two parts: the pretrain config and other configs. To avoid any confusion arising from potential overlapping parameter names, we employ a hyphen (-) to specify the parameters of pretrain config and use a double hyphen (--) to specify the parameters of other configs. Please note that if two parameters have the same name, **the settings of the latter can override those of the former.**
@@ -311,19 +357,27 @@ dataset_use = ['PEMS07M']
 Directly evaluate a pretrained model on a dataset **without any training**. This is used for both in-pretrain datasets (supervised evaluation) and out-of-pretrain datasets (zero-shot evaluation).
 
 ```bash
-# First, edit pretrain.conf:
+# First, edit conf/general_conf/pretrain.conf:
 #   dataset_use = ['PEMS07M']
 #   val_ratio = 0.1
 #   test_ratio = 0.4
 
+# Run from the OpenCity/ project root:
+
 # Use OpenCity-plus to evaluate
-python Run.py -mode test -model OpenCity -load_pretrain_path OpenCity-plus.pth -batch_size 2 --embed_dim 512 --skip_dim 512 --enc_depth 6
+uv run python model/Run.py -mode test -model OpenCity \
+  -load_pretrain_path OpenCity_plus.pth -batch_size 2 \
+  --embed_dim 512 --skip_dim 512 --enc_depth 6
 
 # Use OpenCity-base to evaluate
-python Run.py -mode test -model OpenCity -load_pretrain_path OpenCity-base.pth -batch_size 2 --embed_dim 256 --skip_dim 256 --enc_depth 3
+uv run python model/Run.py -mode test -model OpenCity \
+  -load_pretrain_path OpenCity_base.pth -batch_size 2 \
+  --embed_dim 256 --skip_dim 256 --enc_depth 3
 
 # Use OpenCity-mini to evaluate
-python Run.py -mode test -model OpenCity -load_pretrain_path OpenCity-mini.pth -batch_size 2 --embed_dim 128 --skip_dim 128 --enc_depth 3
+uv run python model/Run.py -mode test -model OpenCity \
+  -load_pretrain_path OpenCity_mini.pth -batch_size 2 \
+  --embed_dim 128 --skip_dim 128 --enc_depth 3
 ```
 
 #### 4.2 Fast Adaptation / Efficient Fine-tuning (`eval` mode)
@@ -331,15 +385,22 @@ python Run.py -mode test -model OpenCity -load_pretrain_path OpenCity-mini.pth -
 Load a pretrained model, **freeze all backbone parameters**, and only fine-tune the **prediction head** (the last linear layer) for a few epochs. This is used for fast adaptation to unseen data categories (e.g., CD_DIDI, SZ_DIDI which are traffic index data not seen during pretraining).
 
 ```bash
-# First, edit pretrain.conf:
+# First, edit conf/general_conf/pretrain.conf:
 #   dataset_use = ['CD_DIDI']
 #   val_ratio = 0.1
 #   test_ratio = 0.4
-#   epochs = 3          (fast adaptation uses only 3 epochs)
-#   batch_size = 64
 
-# Fast Adaptation with OpenCity-plus
-python Run.py -mode eval -model OpenCity -load_pretrain_path OpenCity-plus.pth -batch_size 64 -epochs 3 --embed_dim 512 --skip_dim 512 --enc_depth 6
+# Run from the OpenCity/ project root:
+
+# Fast Adaptation with OpenCity-plus (3 epochs, batch size 64)
+uv run python model/Run.py -mode eval -model OpenCity \
+  -load_pretrain_path OpenCity_plus.pth -batch_size 64 -epochs 3 \
+  --embed_dim 512 --skip_dim 512 --enc_depth 6
+
+# Fast Adaptation with OpenCity-base
+uv run python model/Run.py -mode eval -model OpenCity \
+  -load_pretrain_path OpenCity_base.pth -batch_size 64 -epochs 3 \
+  --embed_dim 256 --skip_dim 256 --enc_depth 3
 ```
 
 > **What `eval` mode does**: Loads pretrained weights → freezes all parameters → unfreezes only `model.predictor.linear` (the prediction head) → trains for the specified number of epochs with early stopping.
@@ -349,17 +410,63 @@ python Run.py -mode eval -model OpenCity -load_pretrain_path OpenCity-plus.pth -
 Train a model from scratch on a single dataset with full train/val/test split and early stopping. Used for baseline comparisons.
 
 ```bash
-# First, edit pretrain.conf:
+# First, edit conf/general_conf/pretrain.conf:
 #   dataset_use = ['CD_DIDI']
 #   val_ratio = 0.1
 #   test_ratio = 0.4
 
+# Run from the OpenCity/ project root:
+
 # Run STGCN baseline (100 epochs, early stop after 15)
-python Run.py -mode ori -model STGCN -batch_size 64 -epochs 100 -early_stop True -early_stop_patience 15 --real_value False
+uv run python model/Run.py -mode ori -model STGCN \
+  -batch_size 64 -epochs 100 \
+  -early_stop True -early_stop_patience 15 --real_value False
 
 # Run OpenCity from scratch (for comparison)
-python Run.py -mode ori -model OpenCity -batch_size 8 --embed_dim 256 --skip_dim 256 --enc_depth 3
+uv run python model/Run.py -mode ori -model OpenCity \
+  -batch_size 8 --embed_dim 256 --skip_dim 256 --enc_depth 3
 ```
+
+#### 4.4 In-Context Traffic Forecasting (`ict` mode)
+
+Run zero-shot inference using **In-Context Traffic** (ICT): a pretrained model is loaded with all parameters frozen, and a set of demonstration (prefix) traffic sequences is prepended to the query to guide prediction — no gradient updates occur.
+
+ICT parameters (controlled via `conf/ICT/ICT.conf` or CLI flags):
+
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `-num_demonstrations` | `1` | Number of demonstration pairs (K) prepended to each query |
+| `-num_prefix_selections` | `1` | Number of prefix candidates sampled per query |
+| `-demo_selection` | `random` | Strategy for selecting demonstrations (`random`) |
+
+```bash
+# First, edit conf/general_conf/pretrain.conf:
+#   dataset_use = ['PEMS07M']   # single target dataset
+#   val_ratio = 0.1
+#   test_ratio = 0.4
+
+# Run from the OpenCity/ project root:
+
+# ICT inference with OpenCity-plus (1 demonstration, random selection)
+uv run python model/Run.py -mode ict -model OpenCity \
+  -load_pretrain_path OpenCity_plus.pth -batch_size 2 \
+  -num_demonstrations 1 -num_prefix_selections 1 -demo_selection random \
+  --embed_dim 512 --skip_dim 512 --enc_depth 6
+
+# ICT inference with OpenCity-base
+uv run python model/Run.py -mode ict -model OpenCity \
+  -load_pretrain_path OpenCity_base.pth -batch_size 2 \
+  -num_demonstrations 1 -num_prefix_selections 1 -demo_selection random \
+  --embed_dim 256 --skip_dim 256 --enc_depth 3
+
+# ICT inference with OpenCity-mini
+uv run python model/Run.py -mode ict -model OpenCity \
+  -load_pretrain_path OpenCity_mini.pth -batch_size 2 \
+  -num_demonstrations 1 -num_prefix_selections 1 -demo_selection random \
+  --embed_dim 128 --skip_dim 128 --enc_depth 3
+```
+
+> **What `ict` mode does**: Loads pretrained weights → freezes all parameters → builds ICT dataloaders with demonstration prefixes → runs inference via `test_ict()` (no training, no weight updates).
 
 #### Summary of Modes
 
@@ -369,6 +476,7 @@ python Run.py -mode ori -model OpenCity -batch_size 8 --embed_dim 256 --skip_dim
 | `test` | Pure inference, no training | None | Zero-shot & supervised evaluation |
 | `eval` | Efficient fine-tuning | Prediction head only (`linear` layer) | Fast adaptation to unseen data |
 | `ori` | Full supervised training | All | Baseline comparisons |
+| `ict` | In-context inference with demonstration prefixes | None | Zero-shot ICT evaluation |
 
 <!--
 ## Contact
