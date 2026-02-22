@@ -14,7 +14,7 @@ A pytorch implementation for the paper: [OpenCity: Open Spatio-Temporal Foundati
 <a href='https://github.com/HKUDS/OpenCity'><img src='https://img.shields.io/badge/Demo-Page-purple'></a> 
 <#><img src='https://img.shields.io/badge/Paper-PDF-orange'></a> 
 [![YouTube](https://badges.aleen42.com/src/youtube.svg)](https://www.youtube.com/watch?v=4BIbQt-EIAM)
- • 🌐 <a href="https://zhuanlan.zhihu.com/p/684785925" target="_blank">中文博客</a>
+ • 🌐 <a href="https://zhuanlan.zhihu.com/p/684785925" target="_blank">Chinese Blog</a>
 -->
 This repository hosts the code, data, and model weights of **OpenCity**.
 
@@ -239,7 +239,7 @@ Use `uv run` to execute scripts within the managed environment (no manual activa
 # Zero-shot evaluation example (OpenCity-plus on PEMS07M)
 cd /path/to/OpenCity/model
 uv run python Run.py -mode test -model OpenCity \
-  -load_pretrain_path OpenCity_plus.pth -batch_size 2 \
+  -load_pretrain_path OpenCity-plus.pth -batch_size 2 \
   --embed_dim 512 --skip_dim 512 --enc_depth 6
 ```
 
@@ -251,7 +251,7 @@ source ../.venv/bin/activate
 
 # Zero-shot evaluation example (OpenCity-plus on PEMS07M)
 python Run.py -mode test -model OpenCity \
-  -load_pretrain_path OpenCity_plus.pth -batch_size 2 \
+  -load_pretrain_path OpenCity-plus.pth -batch_size 2 \
   --embed_dim 512 --skip_dim 512 --enc_depth 6
 ```
 
@@ -376,17 +376,17 @@ cd /path/to/OpenCity/model
 
 # Use OpenCity-plus to evaluate
 uv run python Run.py -mode test -model OpenCity \
-  -load_pretrain_path OpenCity_plus.pth -batch_size 2 \
+  -load_pretrain_path OpenCity-plus.pth -batch_size 2 \
   --embed_dim 512 --skip_dim 512 --enc_depth 6
 
 # Use OpenCity-base to evaluate
 uv run python Run.py -mode test -model OpenCity \
-  -load_pretrain_path OpenCity_base.pth -batch_size 2 \
+  -load_pretrain_path OpenCity-base.pth -batch_size 2 \
   --embed_dim 256 --skip_dim 256 --enc_depth 3
 
 # Use OpenCity-mini to evaluate
 uv run python Run.py -mode test -model OpenCity \
-  -load_pretrain_path OpenCity_mini.pth -batch_size 2 \
+  -load_pretrain_path OpenCity-mini.pth -batch_size 2 \
   --embed_dim 128 --skip_dim 128 --enc_depth 3
 ```
 
@@ -405,12 +405,12 @@ cd /path/to/OpenCity/model
 
 # Fast Adaptation with OpenCity-plus (3 epochs, batch size 64)
 uv run python Run.py -mode eval -model OpenCity \
-  -load_pretrain_path OpenCity_plus.pth -batch_size 64 -epochs 3 \
+  -load_pretrain_path OpenCity-plus.pth -batch_size 64 -epochs 3 \
   --embed_dim 512 --skip_dim 512 --enc_depth 6
 
 # Fast Adaptation with OpenCity-base
 uv run python Run.py -mode eval -model OpenCity \
-  -load_pretrain_path OpenCity_base.pth -batch_size 64 -epochs 3 \
+  -load_pretrain_path OpenCity-base.pth -batch_size 64 -epochs 3 \
   --embed_dim 256 --skip_dim 256 --enc_depth 3
 ```
 
@@ -462,19 +462,19 @@ cd /path/to/OpenCity/model
 
 # ICT inference with OpenCity-plus (1 demonstration, random selection)
 uv run python Run.py -mode ict -model OpenCity \
-  -load_pretrain_path OpenCity_plus.pth -batch_size 2 \
+  -load_pretrain_path OpenCity-plus.pth -batch_size 2 \
   -num_demonstrations 1 -num_prefix_selections 1 -demo_selection random \
   --embed_dim 512 --skip_dim 512 --enc_depth 6
 
 # ICT inference with OpenCity-base
 uv run python Run.py -mode ict -model OpenCity \
-  -load_pretrain_path OpenCity_base.pth -batch_size 2 \
+  -load_pretrain_path OpenCity-base.pth -batch_size 2 \
   -num_demonstrations 1 -num_prefix_selections 1 -demo_selection random \
   --embed_dim 256 --skip_dim 256 --enc_depth 3
 
 # ICT inference with OpenCity-mini
 uv run python Run.py -mode ict -model OpenCity \
-  -load_pretrain_path OpenCity_mini.pth -batch_size 2 \
+  -load_pretrain_path OpenCity-mini.pth -batch_size 2 \
   -num_demonstrations 1 -num_prefix_selections 1 -demo_selection random \
   --embed_dim 128 --skip_dim 128 --enc_depth 3
 ```

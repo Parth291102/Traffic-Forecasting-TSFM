@@ -21,8 +21,13 @@ venv/
 .python-version
 uv.lock
 
-# ============ Data & Model Weights (tracked via Git LFS) ============ #
-# .npy, .npz, .pth files are tracked by Git LFS (see .gitattributes)
+# ============ Data files (large, download from HuggingFace) ============ #
+OpenCity/data/**/*.npy
+OpenCity/data/**/*.npz
+OpenCity/data/**/*.h5
+OpenCity/data/OpenCity/
+In-context/example/**/*.pkl
+In-context/example_data/*.pkl
 
 # ============ IDE & OS ============ #
 .vscode/

@@ -1,4 +1,2 @@
-*.pkl filter=lfs diff=lfs merge=lfs -text
-OpenCity/model_weights/**/*.pth filter=lfs diff=lfs merge=lfs -text
-OpenCity/data/**/*.npy filter=lfs diff=lfs merge=lfs -text
-OpenCity/data/**/*.npz filter=lfs diff=lfs merge=lfs -text
+# LFS tracking removed - model weights stored as regular git objects
+# Data files are managed locally and excluded via .gitignore
