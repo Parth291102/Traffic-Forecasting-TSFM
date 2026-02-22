@@ -222,29 +222,31 @@ rm -rf .venv && uv sync
 
 #### Running Commands
 
-> **Important**: All `Run.py` commands below must be run from the **`OpenCity/`** project root directory (i.e., the directory containing `Run.py`, `conf/`, `data/`, etc.).
+> **Important**: `Run.py` uses relative paths (`../conf/`) to locate config files, so it **must be run from inside the `OpenCity/model/` directory**.
 
 ```shell
-cd /path/to/OpenCity   # make sure you are in the project root
+cd /path/to/OpenCity/model   # ⚠️  required working directory for all run commands
 ```
 
 Use `uv run` to execute scripts within the managed environment (no manual activation needed):
 
 ```shell
 # Zero-shot evaluation example (OpenCity-plus on PEMS07M)
-uv run python model/Run.py -mode test -model OpenCity \
-  -load_pretrain_path OpenCity-plus.pth -batch_size 2 \
+cd /path/to/OpenCity/model
+uv run python Run.py -mode test -model OpenCity \
+  -load_pretrain_path OpenCity_plus.pth -batch_size 2 \
   --embed_dim 512 --skip_dim 512 --enc_depth 6
 ```
 
 Or activate the virtual environment first and then run `python` directly:
 
 ```shell
-source .venv/bin/activate
+cd /path/to/OpenCity/model
+source ../.venv/bin/activate
 
 # Zero-shot evaluation example (OpenCity-plus on PEMS07M)
-python model/Run.py -mode test -model OpenCity \
-  -load_pretrain_path OpenCity-plus.pth -batch_size 2 \
+python Run.py -mode test -model OpenCity \
+  -load_pretrain_path OpenCity_plus.pth -batch_size 2 \
   --embed_dim 512 --skip_dim 512 --enc_depth 6
 ```
 
@@ -280,21 +282,23 @@ pip install -r requirements.txt
 
 #### 3.2. Pre-training <a href='#all_catelogue'>[Back to Top]</a>
 
-* To pretrain the OpenCity model with different configurations, you can execute the `Run.py` script from inside the `OpenCity/` directory. There are some examples:
+* To pretrain the OpenCity model with different configurations, execute `Run.py` from inside the `OpenCity/model/` directory:
 
 ```bash
+cd /path/to/OpenCity/model
+
 # OpenCity-plus
-uv run python model/Run.py -mode pretrain -model OpenCity \
+uv run python Run.py -mode pretrain -model OpenCity \
   -save_pretrain_path OpenCity-plus2.0.pth -batch_size 4 \
   --embed_dim 512 --skip_dim 512 --enc_depth 6
 
 # OpenCity-base
-uv run python model/Run.py -mode pretrain -model OpenCity \
+uv run python Run.py -mode pretrain -model OpenCity \
   -save_pretrain_path OpenCity-base2.0.pth -batch_size 8 \
   --embed_dim 256 --skip_dim 256 --enc_depth 3
 
 # OpenCity-mini
-uv run python model/Run.py -mode pretrain -model OpenCity \
+uv run python Run.py -mode pretrain -model OpenCity \
   -save_pretrain_path OpenCity-mini2.0.pth -batch_size 16 \
   --embed_dim 128 --skip_dim 128 --enc_depth 3
 ```
@@ -362,20 +366,21 @@ Directly evaluate a pretrained model on a dataset **without any training**. This
 #   val_ratio = 0.1
 #   test_ratio = 0.4
 
-# Run from the OpenCity/ project root:
+# ⚠️  Run from OpenCity/model/ (not the project root):
+cd /path/to/OpenCity/model
 
 # Use OpenCity-plus to evaluate
-uv run python model/Run.py -mode test -model OpenCity \
+uv run python Run.py -mode test -model OpenCity \
   -load_pretrain_path OpenCity_plus.pth -batch_size 2 \
   --embed_dim 512 --skip_dim 512 --enc_depth 6
 
 # Use OpenCity-base to evaluate
-uv run python model/Run.py -mode test -model OpenCity \
+uv run python Run.py -mode test -model OpenCity \
   -load_pretrain_path OpenCity_base.pth -batch_size 2 \
   --embed_dim 256 --skip_dim 256 --enc_depth 3
 
 # Use OpenCity-mini to evaluate
-uv run python model/Run.py -mode test -model OpenCity \
+uv run python Run.py -mode test -model OpenCity \
   -load_pretrain_path OpenCity_mini.pth -batch_size 2 \
   --embed_dim 128 --skip_dim 128 --enc_depth 3
 ```
@@ -390,15 +395,16 @@ Load a pretrained model, **freeze all backbone parameters**, and only fine-tune 
 #   val_ratio = 0.1
 #   test_ratio = 0.4
 
-# Run from the OpenCity/ project root:
+# ⚠️  Run from OpenCity/model/ (not the project root):
+cd /path/to/OpenCity/model
 
 # Fast Adaptation with OpenCity-plus (3 epochs, batch size 64)
-uv run python model/Run.py -mode eval -model OpenCity \
+uv run python Run.py -mode eval -model OpenCity \
   -load_pretrain_path OpenCity_plus.pth -batch_size 64 -epochs 3 \
   --embed_dim 512 --skip_dim 512 --enc_depth 6
 
 # Fast Adaptation with OpenCity-base
-uv run python model/Run.py -mode eval -model OpenCity \
+uv run python Run.py -mode eval -model OpenCity \
   -load_pretrain_path OpenCity_base.pth -batch_size 64 -epochs 3 \
   --embed_dim 256 --skip_dim 256 --enc_depth 3
 ```
@@ -415,15 +421,16 @@ Train a model from scratch on a single dataset with full train/val/test split an
 #   val_ratio = 0.1
 #   test_ratio = 0.4
 
-# Run from the OpenCity/ project root:
+# ⚠️  Run from OpenCity/model/ (not the project root):
+cd /path/to/OpenCity/model
 
 # Run STGCN baseline (100 epochs, early stop after 15)
-uv run python model/Run.py -mode ori -model STGCN \
+uv run python Run.py -mode ori -model STGCN \
   -batch_size 64 -epochs 100 \
   -early_stop True -early_stop_patience 15 --real_value False
 
 # Run OpenCity from scratch (for comparison)
-uv run python model/Run.py -mode ori -model OpenCity \
+uv run python Run.py -mode ori -model OpenCity \
   -batch_size 8 --embed_dim 256 --skip_dim 256 --enc_depth 3
 ```
 
@@ -445,22 +452,23 @@ ICT parameters (controlled via `conf/ICT/ICT.conf` or CLI flags):
 #   val_ratio = 0.1
 #   test_ratio = 0.4
 
-# Run from the OpenCity/ project root:
+# ⚠️  Run from OpenCity/model/ (not the project root):
+cd /path/to/OpenCity/model
 
 # ICT inference with OpenCity-plus (1 demonstration, random selection)
-uv run python model/Run.py -mode ict -model OpenCity \
+uv run python Run.py -mode ict -model OpenCity \
   -load_pretrain_path OpenCity_plus.pth -batch_size 2 \
   -num_demonstrations 1 -num_prefix_selections 1 -demo_selection random \
   --embed_dim 512 --skip_dim 512 --enc_depth 6
 
 # ICT inference with OpenCity-base
-uv run python model/Run.py -mode ict -model OpenCity \
+uv run python Run.py -mode ict -model OpenCity \
   -load_pretrain_path OpenCity_base.pth -batch_size 2 \
   -num_demonstrations 1 -num_prefix_selections 1 -demo_selection random \
   --embed_dim 256 --skip_dim 256 --enc_depth 3
 
 # ICT inference with OpenCity-mini
-uv run python model/Run.py -mode ict -model OpenCity \
+uv run python Run.py -mode ict -model OpenCity \
   -load_pretrain_path OpenCity_mini.pth -batch_size 2 \
   -num_demonstrations 1 -num_prefix_selections 1 -demo_selection random \
   --embed_dim 128 --skip_dim 128 --enc_depth 3
