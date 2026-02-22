@@ -25,6 +25,7 @@ uv.lock
 OpenCity/data/**/*.npy
 OpenCity/data/**/*.npz
 OpenCity/data/**/*.h5
+OpenCity/data/ca_meta.csv
 OpenCity/data/OpenCity/
 In-context/example/**/*.pkl
 In-context/example_data/*.pkl

@@ -187,25 +187,41 @@ cd OpenCity
 #     Verify before proceeding:
 pwd   # should end with /OpenCity
 
-# Step 2: Pull LFS-tracked files (model weights, adjacency matrices, etc.)
-#   The repo uses Git LFS for large binary files (.npy, .pth, .npz).
-#   Without this step those files contain only LFS pointer text, not real data.
-git lfs pull
-
-# Step 3: Install uv into the project's own bin/ directory
+# Step 2: Install uv into the project's own bin/ directory
 #   UV_INSTALL_DIR pins uv to the repo root so it is self-contained
 #   and independent from any system-wide or user-wide uv installation.
 curl -LsSf https://astral.sh/uv/install.sh | UV_INSTALL_DIR="$(pwd)/bin" sh
 
-# Step 4: Add the local bin/ to PATH for the current shell session
+# Step 3: Add the local bin/ to PATH for the current shell session
 export PATH="$(pwd)/bin:$PATH"
 
 # To persist across sessions you can add the absolute path to your shell profile:
 # echo 'export PATH="/absolute/path/to/OpenCity/bin:$PATH"' >> ~/.bashrc   # bash
 # echo 'export PATH="/absolute/path/to/OpenCity/bin:$PATH"' >> ~/.zshrc    # zsh
 
-# Step 5: Install all dependencies (Python 3.9, PyTorch 2.4.1+cu124, etc.)
+# Step 4: Install all dependencies (Python 3.9, PyTorch 2.4.1+cu124, etc.)
 uv sync
+
+# Step 5: Download datasets and CA raw files from Hugging Face
+#   Model weights are already in the repo (model_weights/OpenCity/).
+#   Full list: https://huggingface.co/datasets/hkuds/OpenCity-dataset/tree/main
+cd data
+HF_BASE="https://huggingface.co/datasets/hkuds/OpenCity-dataset/resolve/main"
+for f in \
+  PEMS04.zip PEMS07M.zip PEMS08.zip PEMS_BAY.zip METR_LA.zip \
+  NYC_TAXI.zip CHI_TAXI.zip NYC_BIKE-3.zip \
+  CD_DIDI.zip SZ_DIDI.zip \
+  TrafficCD.zip TrafficHZ.zip TrafficJN.zip TrafficNJ.zip TrafficSH.zip TrafficTJ.zip TrafficZZ.zip \
+  ca_his_raw_2020.h5.zip ca_meta.zip ca_rn_adj.npy.zip; do
+  echo "=== ${f} ==="
+  curl -L -o "${f}" "${HF_BASE}/${f}"
+  unzip -q "${f}" && rm "${f}"
+done
+
+# Step 6: Generate California highway datasets (CAD3, CAD4-*, CAD5, CAD7-*, CAD8-*, CAD12-*)
+#   generate_ca_data.py uses relative paths, so it must run from inside data/
+uv run python generate_ca_data.py
+cd ..
 ```
 
 `uv sync` will automatically:
@@ -249,7 +265,6 @@ Or activate the virtual environment first and then run `python` directly:
 cd /path/to/OpenCity/model
 source ../.venv/bin/activate
 
-# Zero-shot evaluation example (OpenCity-plus on PEMS07M)
 python Run.py -mode test -model OpenCity \
   -load_pretrain_path OpenCity-plus.pth -batch_size 2 \
   --embed_dim 512 --skip_dim 512 --enc_depth 6
@@ -280,8 +295,7 @@ pip install -r requirements.txt
 
 #### 3.1. Preparing Pre-trained Data <a href='#all_catelogue'>[Back to Top]</a>
 
-* The model's generalization capabilities and predictive performance were extensively evaluated using a diverse set of large-scale, real-world public datasets covering various traffic-related data categories, including **Traffic Flow**, **Taxi Demand**, **Bicycle Trajectories**, **Traffic Speed Statistics**, and **Traffic Index Statistics**, from regions across the United States and China, such as New York City, Chicago, Los Angeles, the Bay Area, Shanghai, Shenzhen, and Chengdu. <br />
-* These data are organized in [OpenCity-dataset](https://huggingface.co/datasets/hkuds/OpenCity-dataset/tree/main). Please download it and put it at ./data. Subsequently, unzip all files and run [generate_ca_data.py](https://github.com/HKUDS/OpenCity/blob/main/data/generate_ca_data.py).
+All datasets are hosted on [Hugging Face](https://huggingface.co/datasets/hkuds/OpenCity-dataset/tree/main). Follow **Steps 5–6** in the [Quick Start](#Environment) above to download all files and generate the California highway subsets.
 
 <span id='Pre-training'/>
 
@@ -314,7 +328,8 @@ uv run python Run.py -mode pretrain -model OpenCity \
 
 ### 4. Evaluating <a href='#all_catelogue'>[Back to Top]</a>
 
-* **Preparing Checkpoints of OpenCity**. You can download our model using the following link: [OpenCity-Plus](https://huggingface.co/hkuds/OpenCity-Plus/tree/main), [OpenCity-Base](https://huggingface.co/hkuds/OpenCity-Base/tree/main), [OpenCity-Mini](https://huggingface.co/hkuds/OpenCity-Mini/tree/main)
+* **Model Weights**: The pretrained model weights (`OpenCity-plus.pth`, `OpenCity-base.pth`, `OpenCity-mini.pth`) are stored directly in the repository under `model_weights/OpenCity/`. No additional download is needed after cloning.
+  * If the weights are missing or you need to re-download them, use these Hugging Face links: [OpenCity-Plus](https://huggingface.co/hkuds/OpenCity-Plus/tree/main), [OpenCity-Base](https://huggingface.co/hkuds/OpenCity-Base/tree/main), [OpenCity-Mini](https://huggingface.co/hkuds/OpenCity-Mini/tree/main)
 
 #### ⚠️ Important: Configure `pretrain.conf` Before Evaluation
 
