@@ -1,6 +1,7 @@
 fastdtw
 numpy
 pandas
+scikit-learn
 scipy
 tqdm
 tslearn

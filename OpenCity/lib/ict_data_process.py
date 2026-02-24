@@ -10,6 +10,7 @@ import torch
 import numpy as np
 import random
 from torch.utils.data import Dataset, DataLoader, ConcatDataset
+from sklearn.neighbors import NearestNeighbors
 
 from lib.data_process import (
     load_st_dataset,
@@ -72,6 +73,20 @@ class ICTTrafficDataset(Dataset):
             for i in range(0, len(self.windows), batch_size)
         ]
 
+        # Precompute flattened demo histories and build KNN index
+        if len(self.demo_pool) > 0:
+            try:
+                self._demo_hist_flat = np.stack([p[0] for p in self.demo_pool]).reshape(len(self.demo_pool), -1)
+                self._knn = NearestNeighbors(n_neighbors=min(num_demonstrations, len(self.demo_pool)), metric='euclidean')
+                self._knn.fit(self._demo_hist_flat)
+            except Exception as e:
+                print(f'[ICT] Warning: KNN index build failed: {e}. Falling back to random sampling.')
+                self._knn = None
+                self._demo_hist_flat = None
+        else:
+            self._knn = None
+            self._demo_hist_flat = None
+
     def __len__(self):
         return len(self.batches)
 
@@ -94,11 +109,41 @@ class ICTTrafficDataset(Dataset):
         else:
             for b in range(B):
                 sets_x, sets_y = [], []
+                # Flatten query for KNN search
+                query_flat = batch_x[b].numpy().reshape(-1)
+                demo_pool_size = len(self.demo_pool)
+
+                # Select K nearest neighbors using KNN
+                if self._knn is not None and demo_pool_size > 0:
+                    # Query KNN for nearest neighbors
+                    k_query = min(K, demo_pool_size)
+                    _, indices_array = self._knn.kneighbors(query_flat.reshape(1, -1), n_neighbors=k_query)
+                    indices_base = indices_array[0]
+                    
+                    # If K > pool_size, tile to get K samples
+                    if K > demo_pool_size:
+                        reps = int(np.ceil(float(K) / float(demo_pool_size)))
+                        indices_base = np.tile(indices_base, reps)[:K]
+                else:
+                    # Fallback to random sampling if KNN not available
+                    if demo_pool_size > 0:
+                        indices_base = np.array(random.sample(range(demo_pool_size), min(K, demo_pool_size)))
+                        if K > demo_pool_size:
+                            reps = int(np.ceil(float(K) / float(demo_pool_size)))
+                            indices_base = np.tile(indices_base, reps)[:K]
+                    else:
+                        indices_base = np.array([])
+
                 for s in range(S):
-                    # Sample K demos independently for each (query, selection) pair
-                    indices = random.sample(range(len(self.demo_pool)), K)
-                    dk_x = np.stack([self.demo_pool[i][0] for i in indices])  # [K, T, N, F]
-                    dk_y = np.stack([self.demo_pool[i][1] for i in indices])  # [K, T, N, F]
+                    # Use same KNN indices for all S selections (deterministic per query)
+                    if len(indices_base) > 0:
+                        dk_x = np.stack([self.demo_pool[int(i)][0] for i in indices_base])  # [K, T, N, F]
+                        dk_y = np.stack([self.demo_pool[int(i)][1] for i in indices_base])  # [K, T, N, F]
+                    else:
+                        # Create empty arrays with correct shape [0, T, N, F]
+                        T, N, F = batch_x.shape[1], batch_x.shape[2], batch_x.shape[3]
+                        dk_x = np.zeros((0, T, N, F))
+                        dk_y = np.zeros((0, T, N, F))
                     sets_x.append(dk_x)
                     sets_y.append(dk_y)
                 demos_x_list.append(np.stack(sets_x))  # [S, K, T, N, F]

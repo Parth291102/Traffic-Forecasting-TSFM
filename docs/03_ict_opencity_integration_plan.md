@@ -399,7 +399,93 @@ def define_ict_dataloader(args):
 
     return train_loader, val_loader, test_loader, scaler_dict
 ```
+## 3.3 v3 Implementation: KNN-Based Demo Retrieval
 
+### Motivation
+
+Initial ICT experiments used random demonstration sampling.  
+This produced unstable residual corrections because demonstrations often came from unrelated traffic regimes.
+
+As a result:
+
+- residual estimates varied significantly,
+- performance degraded relative to zero-shot inference,
+- increasing averaging (S) only partially reduced noise.
+
+To resolve this, demonstration selection was upgraded to **similarity-based retrieval using K-Nearest Neighbors (KNN)**.
+
+---
+
+### Key Idea
+
+Instead of randomly sampling demonstrations, each query retrieves demonstrations whose historical traffic patterns are closest in feature space.
+
+Formally:
+
+\[
+demo^* = \arg\min_{d \in pool} \| x_{query} - x_d \|_2
+\]
+
+where histories are flattened into vectors and compared using Euclidean distance.
+
+The assumption is:
+
+> similar histories → similar prediction bias → transferable residuals.
+
+---
+
+### Implementation Location
+
+All changes are implemented inside:
+lib/ict_data_process.py
+
+
+Specifically within:
+ICTTrafficDataset
+
+
+---
+
+### Implementation Details
+
+#### 1. Feature Construction
+
+Each history window is flattened:
+[num_windows, T × N × F]
+
+
+This allows efficient similarity search while preserving temporal information.
+
+---
+
+#### 2. KNN Index Construction (Initialization)
+
+During dataset initialization:
+
+```python
+from sklearn.neighbors import NearestNeighbors
+
+self.knn = NearestNeighbors(
+    n_neighbors=self.K,
+    metric="euclidean"
+)
+self.knn.fit(self.demo_feature_matrix)
+
+```
+
+#### 3. Demo Retrieval (__getitem__)
+
+For each query sample:
+
+Flatten query history
+
+Run KNN lookup
+
+distances, indices = self.knn.kneighbors(query_vector)
+
+Retrieve demo windows using returned indices
+
+Return deterministic demo set
 ---
 
 #### Step 2 ✅ (Done): OpenCity Model — `forward_ict` Method (`model/OpenCity/OpenCity.py`)
