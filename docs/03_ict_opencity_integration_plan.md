@@ -477,15 +477,28 @@ self.knn.fit(self.demo_feature_matrix)
 
 For each query sample:
 
-Flatten query history
-
-Run KNN lookup
-
+1. Flatten query history
+2. Run KNN lookup
+```python
 distances, indices = self.knn.kneighbors(query_vector)
+```
+3. Retrieve demo windows using returned indices
+4. Return deterministic demo set
 
-Retrieve demo windows using returned indices
+#### 4. Deterministic Behavior
 
-Return deterministic demo set
+Unlike random sampling:
+
+* same query → same demonstrations
+* removes stochastic variance
+* improves reproducibility
+
+#### 5. Fallback Mode
+
+If KNN construction fails:
+
+* dataset automatically falls back to random sampling
+* ensures backward compatibility.
 ---
 
 #### Step 2 ✅ (Done): OpenCity Model — `forward_ict` Method (`model/OpenCity/OpenCity.py`)
