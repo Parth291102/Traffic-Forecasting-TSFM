@@ -37,7 +37,7 @@ class ICTTrafficDataset(Dataset):
 
     def __init__(self, data, batch_size, input_window, output_window,
                  demo_pool, num_demonstrations=1, num_prefix_selections=1,
-                 eval_only=False):
+                 demo_selection='random', eval_only=False):
         """
         Args:
             data:          numpy array [T_total, N, F] for this split
@@ -51,13 +51,29 @@ class ICTTrafficDataset(Dataset):
         """
         self.input_window = input_window
         self.output_window = output_window
-        self.demo_pool = demo_pool
+        # demo_pool entries are tuples: (history, future, start_index)
+        # older versions constructed a list of (hist, fut) pairs; wrap
+        # those into triples with index=0 for backwards compatibility.
+        self.demo_pool = []
+        for entry in demo_pool:
+            if len(entry) == 3:
+                self.demo_pool.append(entry)
+            else:
+                # legacy: no index information
+                self.demo_pool.append((entry[0], entry[1], 0))
+
+        self.num_demonstrations = num_demonstrations
+        self.num_prefix_selections = num_prefix_selections
+        self.demo_selection = demo_selection
         self.num_demonstrations = num_demonstrations
         self.num_prefix_selections = num_prefix_selections
 
-        # Create sliding windows (same as TrafficDataset)
+        # Create sliding windows (same as TrafficDataset) but also record
+        # the start index of each window to support "recent" selection.
         self.windows = [
-            (data[i:i + input_window], data[i + input_window:i + input_window + output_window])
+            (data[i:i + input_window],
+             data[i + input_window:i + input_window + output_window],
+             i)
             for i in range(len(data) - input_window - output_window + 1)
         ]
 
@@ -73,26 +89,35 @@ class ICTTrafficDataset(Dataset):
             for i in range(0, len(self.windows), batch_size)
         ]
 
-        # Precompute flattened demo histories and build KNN index
+        # Precompute flattened demo histories and (optionally) build KNN index
         if len(self.demo_pool) > 0:
+            # keep a separate list of start indices to support 'recent' selection
+            self._demo_indices = np.array([p[2] for p in self.demo_pool])
             try:
-                self._demo_hist_flat = np.stack([p[0] for p in self.demo_pool]).reshape(len(self.demo_pool), -1)
-                self._knn = NearestNeighbors(n_neighbors=min(num_demonstrations, len(self.demo_pool)), metric='euclidean')
-                self._knn.fit(self._demo_hist_flat)
+                demo_hists = [p[0] for p in self.demo_pool]
+                self._demo_hist_flat = np.stack(demo_hists).reshape(len(self.demo_pool), -1)
+                # only build a KNN index if the selection strategy relies on similarity
+                if self.demo_selection == 'similar':
+                    self._knn = NearestNeighbors(n_neighbors=min(num_demonstrations, len(self.demo_pool)), metric='euclidean')
+                    self._knn.fit(self._demo_hist_flat)
+                else:
+                    self._knn = None
             except Exception as e:
-                print(f'[ICT] Warning: KNN index build failed: {e}. Falling back to random sampling.')
+                print(f'[ICT] Warning: demo precompute failed ({e}). Falling back to random sampling.')
                 self._knn = None
                 self._demo_hist_flat = None
         else:
             self._knn = None
             self._demo_hist_flat = None
+            self._demo_indices = np.array([])
 
     def __len__(self):
         return len(self.batches)
 
     def __getitem__(self, idx):
         batch_pairs = self.batches[idx]
-        batch_x, batch_y = zip(*batch_pairs)
+        # each element of batch_pairs is now (hist, fut, start_idx)
+        batch_x, batch_y, batch_idx = zip(*batch_pairs)
         batch_x = torch.from_numpy(np.stack(batch_x)).float()  # [B, T, N, F]
         batch_y = torch.from_numpy(np.stack(batch_y)).float()  # [B, T, N, F]
 
@@ -109,23 +134,37 @@ class ICTTrafficDataset(Dataset):
         else:
             for b in range(B):
                 sets_x, sets_y = [], []
-                # Flatten query for KNN search
+                # Flatten query for similarity search, if needed
                 query_flat = batch_x[b].numpy().reshape(-1)
                 demo_pool_size = len(self.demo_pool)
 
-                # Select K nearest neighbors using KNN
-                if self._knn is not None and demo_pool_size > 0:
+                # choose demo indices depending on selection strategy
+                if self.demo_selection == 'similar' and self._knn is not None and demo_pool_size > 0:
                     # Query KNN for nearest neighbors
                     k_query = min(K, demo_pool_size)
                     _, indices_array = self._knn.kneighbors(query_flat.reshape(1, -1), n_neighbors=k_query)
                     indices_base = indices_array[0]
-                    
-                    # If K > pool_size, tile to get K samples
                     if K > demo_pool_size:
                         reps = int(np.ceil(float(K) / float(demo_pool_size)))
                         indices_base = np.tile(indices_base, reps)[:K]
+                elif self.demo_selection == 'recent' and demo_pool_size > 0:
+                    # select demos whose start index is just before query start
+                    start_idx = batch_idx[b]
+                    # find demo_pool entries with index < start_idx
+                    valid = np.where(self._demo_indices < start_idx)[0]
+                    if len(valid) > 0:
+                        # take the most recent ones (largest indices)
+                        choose = valid[np.argsort(self._demo_indices[valid])][-K:]
+                        indices_base = choose
+                        if len(indices_base) < K:
+                            reps = int(np.ceil(float(K) / float(len(indices_base))))
+                            indices_base = np.tile(indices_base, reps)[:K]
+                    else:
+                        # fallback to random if no earlier demos exist
+                        indices_base = np.array([])
                 else:
-                    # Fallback to random sampling if KNN not available
+                    # random sampling (also covers cases where pool is empty or
+                    # KNN not built or 'random' strategy selected)
                     if demo_pool_size > 0:
                         indices_base = np.array(random.sample(range(demo_pool_size), min(K, demo_pool_size)))
                         if K > demo_pool_size:
@@ -200,9 +239,11 @@ def define_ict_dataloader(args):
         iw = args.his // (intervel // 5)
         ow = args.pred // (intervel // 5)
 
-        # Build demo pool from training windows (post-normalization)
+        # Build demo pool from training windows (post-normalization).
+        # we attach the start index so that the dataset can support
+        # selection strategies like "recent".
         demo_pool = [
-            (data_train[i:i + iw], data_train[i + iw:i + iw + ow])
+            (data_train[i:i + iw], data_train[i + iw:i + iw + ow], i)
             for i in range(len(data_train) - iw - ow + 1)
         ]
         print(f'[ICT] demo_pool size: {len(demo_pool)}, iw={iw}, ow={ow}')
@@ -213,15 +254,18 @@ def define_ict_dataloader(args):
         train_ds = ICTTrafficDataset(
             data_train, args.batch_size, iw, ow,
             demo_pool, args.num_demonstrations,
-            num_prefix_selections=1, eval_only=False)
+            num_prefix_selections=1, demo_selection=args.demo_selection,
+            eval_only=False)
         val_ds = ICTTrafficDataset(
             data_val, args.batch_size, iw, ow,
             demo_pool, args.num_demonstrations,
-            num_prefix_selections=1, eval_only=True)
+            num_prefix_selections=1, demo_selection=args.demo_selection,
+            eval_only=True)
         test_ds = ICTTrafficDataset(
             data_test, args.batch_size, iw, ow,
             demo_pool, args.num_demonstrations,
             num_prefix_selections=args.num_prefix_selections,
+            demo_selection=args.demo_selection,
             eval_only=True)
 
         dataloder_trn_list.append(train_ds)
