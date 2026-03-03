@@ -134,10 +134,10 @@ class Trainer(object):
     @staticmethod
     def test(model, args, scaler_dict, test_dataloader, logger, path=None):
         if path != None:
-            if torch.cuda.device_count() > 1:
-                model.load_state_dict(torch.load(path))
+            if str(args.device) != 'cpu' and torch.cuda.device_count() > 1:
+                model.load_state_dict(torch.load(path, map_location=args.device))
             else:
-                model_weights = {k.replace('module.', ''): v for k, v in torch.load(path).items()}
+                model_weights = {k.replace('module.', ''): v for k, v in torch.load(path, map_location=args.device).items()}
                 model.load_state_dict(model_weights)
             model.to(args.device)
         model.eval()
@@ -176,9 +176,132 @@ class Trainer(object):
 
         logger.info("Average Horizon, MAE: {:.2f}, RMSE: {:.2f}, MAPE: {:.4f}%, CORR:{:.4f}".format(
             mae, rmse, mape * 100, corr))
+
+    def train_aggregator(self):
+        """Train only the DemoAggregator while keeping the base model frozen.
+
+        Uses ICT dataloaders (4-tuple: inputs, targets, demos_x, demos_y).
+        Only aggregator parameters receive gradients.
+        """
+        args = self.args
+
+        # 1. Freeze all base model parameters
+        for param in self.model.parameters():
+            param.requires_grad = False
+
+        # 2. Initialize aggregator
+        predictor = self.model.predictor
+        aggregator = predictor.init_demo_aggregator(args.aggregator_type)
+        aggregator = aggregator.to(args.device)
+        for param in aggregator.parameters():
+            param.requires_grad = True
+
+        # 3. Optimizer for aggregator only
+        agg_optimizer = torch.optim.Adam(aggregator.parameters(), lr=args.aggregator_lr)
+
+        self.logger.info(f'[Aggregator] type={args.aggregator_type}, '
+                         f'params={sum(p.numel() for p in aggregator.parameters())}, '
+                         f'lr={args.aggregator_lr}, epochs={args.aggregator_epochs}')
+
+        best_loss = float('inf')
+        best_state = None
+        not_improved_count = 0
+
+        for epoch in tqdm(range(args.aggregator_epochs)):
+            # --- Train ---
+            self.model.train()
+            total_loss = 0
+            step = 0
+
+            for batch_data in self.train_dataloader:
+                inputs, targets, demos_x, demos_y = batch_data
+                inputs = inputs.squeeze(0).to(args.device)
+                targets = targets.squeeze(0).to(args.device)
+                demos_x = demos_x.squeeze(0).to(args.device)  # [B, S, K, T, N, F]
+                demos_y = demos_y.squeeze(0).to(args.device)
+
+                select_dataset = get_key_from_value(self.num_nodes_dict, inputs.shape[2])
+
+                # Use first demo selection (S=0) for training
+                output = self.model(inputs, targets, select_dataset,
+                                    demos_x=demos_x[:, 0],  # [B, K, T, N, F]
+                                    demos_y=demos_y[:, 0],
+                                    ict_mode='learned')
+
+                agg_optimizer.zero_grad()
+                loss = self.loss(output, targets[..., :args.output_dim],
+                                 self.scaler_dict[select_dataset])
+                loss.backward()
+
+                if args.grad_norm:
+                    torch.nn.utils.clip_grad_norm_(aggregator.parameters(), args.max_grad_norm)
+                agg_optimizer.step()
+
+                total_loss += loss.item()
+                step += 1
+                if step % args.log_step == 0:
+                    self.logger.info(f'[Aggregator] epoch {epoch} step {step} '
+                                     f'train_loss={total_loss / step:.6f}')
+
+            train_loss = total_loss / max(len(self.train_dataloader), 1)
+            self.logger.info(f'[Aggregator] Epoch {epoch}: train_loss={train_loss:.6f}')
+
+            # --- Validation ---
+            if self.val_dataloader is not None:
+                val_loss = self._val_aggregator_epoch()
+                self.logger.info(f'[Aggregator] Epoch {epoch}: val_loss={val_loss:.6f}')
+
+                if val_loss < best_loss:
+                    best_loss = val_loss
+                    not_improved_count = 0
+                    best_state = copy.deepcopy(aggregator.state_dict())
+                    self.logger.info('[Aggregator] **** New best model saved!')
+                else:
+                    not_improved_count += 1
+
+                if args.early_stop and not_improved_count >= args.early_stop_patience:
+                    self.logger.info(f'[Aggregator] Early stopping after {epoch + 1} epochs')
+                    break
+            else:
+                # No validation: always save latest
+                best_state = copy.deepcopy(aggregator.state_dict())
+
+        # Save best aggregator weights
+        if best_state is not None:
+            save_path = os.path.join(args.log_dir, 'aggregator_best.pth')
+            torch.save(best_state, save_path)
+            self.logger.info(f'[Aggregator] Best weights saved to {save_path}')
+            aggregator.load_state_dict(best_state)
+
+    def _val_aggregator_epoch(self):
+        """Validation epoch for aggregator training."""
+        self.model.eval()
+        total_val_loss = 0
+        with torch.no_grad():
+            for batch_data in self.val_dataloader:
+                inputs, targets, demos_x, demos_y = batch_data
+                inputs = inputs.squeeze(0).to(self.args.device)
+                targets = targets.squeeze(0).to(self.args.device)
+                demos_x = demos_x.squeeze(0).to(self.args.device)
+                demos_y = demos_y.squeeze(0).to(self.args.device)
+
+                select_dataset = get_key_from_value(self.num_nodes_dict, inputs.shape[2])
+
+                output = self.model(inputs, targets, select_dataset,
+                                    demos_x=demos_x[:, 0],
+                                    demos_y=demos_y[:, 0],
+                                    ict_mode='learned')
+
+                loss = self.loss(output, targets[..., :self.args.output_dim],
+                                 self.scaler_dict[select_dataset])
+                if not torch.isnan(loss):
+                    total_val_loss += loss.item()
+
+        return total_val_loss / max(len(self.val_dataloader), 1)
+
     @staticmethod
     def test_ict(model, args, scaler_dict, test_dataloader, logger, path=None,
-                 num_prefix_selections=1):
+                 num_prefix_selections=1, ict_mode='residual'):
         """
         ICT inference: pure forward pass with demonstrations, no gradient updates.
 
@@ -188,10 +311,10 @@ class Trainer(object):
         """
         # Load pretrained weights
         if path is not None:
-            if torch.cuda.device_count() > 1:
-                model.load_state_dict(torch.load(path))
+            if str(args.device) != 'cpu' and torch.cuda.device_count() > 1:
+                model.load_state_dict(torch.load(path, map_location=args.device))
             else:
-                model_weights = {k.replace('module.', ''): v for k, v in torch.load(path).items()}
+                model_weights = {k.replace('module.', ''): v for k, v in torch.load(path, map_location=args.device).items()}
                 model.load_state_dict(model_weights)
             model.to(args.device)
 
@@ -201,7 +324,7 @@ class Trainer(object):
 
         # Determine autocast dtype for memory optimization
         # Use bfloat16: same dynamic range as float32, avoids NaN overflow
-        use_amp = torch.cuda.is_available()
+        use_amp = torch.cuda.is_available() and str(args.device) != 'cpu'
         amp_dtype = torch.bfloat16
 
         with torch.no_grad():
@@ -232,10 +355,11 @@ class Trainer(object):
                 # Average predictions over S independent demo selections
                 outputs = []
                 for s in range(S):
-                    with torch.autocast(device_type='cuda', dtype=amp_dtype, enabled=use_amp):
+                    with torch.autocast(device_type='cuda' if use_amp else 'cpu', dtype=amp_dtype, enabled=use_amp):
                         output_s = model(inputs_m, targets_m, select_dataset,
                                          demos_x=demos_x_m[:, s],    # [B, K, T, N, F]
-                                         demos_y=demos_y_m[:, s])     # [B, K, T, N, F]
+                                         demos_y=demos_y_m[:, s],     # [B, K, T, N, F]
+                                         ict_mode=ict_mode)
                     outputs.append(output_s.float())  # cast back to float32 for metrics
                 output = torch.stack(outputs).mean(dim=0)        # [B, T, N, 1]
 
@@ -257,7 +381,7 @@ class Trainer(object):
 
                 # Free GPU memory between batches
                 del demos_x, demos_y, demos_x_m, demos_y_m, outputs, inputs_m, targets_m
-                if torch.cuda.is_available():
+                if torch.cuda.is_available() and str(args.device) != 'cpu':
                     torch.cuda.empty_cache()
 
         mae /= total_count

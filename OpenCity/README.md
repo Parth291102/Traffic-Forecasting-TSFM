@@ -6,24 +6,9 @@ A pytorch implementation for the paper: [OpenCity: Open Spatio-Temporal Foundati
 
 [Zhonghang Li](https://scholar.google.com/citations?user=__9uvQkAAAAJ), [Long Xia](https://scholar.google.com/citations?user=NRwerBAAAAAJ), [Lei Shi](https://harryshil.github.io/), [Yong Xu](https://scholar.google.com/citations?user=1hx5iwEAAAAJ), [Dawei Yin](https://www.yindawei.com/), [Chao Huang](https://sites.google.com/view/chaoh)* (*Correspondence)<br />  
 
-**[Data Intelligence Lab](https://sites.google.com/view/chaoh/home)@[University of Hong Kong](https://www.hku.hk/)**, [South China University of Technology](https://www.scut.edu.cn/en/), Baidu Inc  
-<!--
------
-
-<a href='https://OpenCity-ST.github.io/'><img src='https://img.shields.io/badge/Project-Page-Green'></a>
-<a href='https://github.com/HKUDS/OpenCity'><img src='https://img.shields.io/badge/Demo-Page-purple'></a> 
-<#><img src='https://img.shields.io/badge/Paper-PDF-orange'></a> 
-[![YouTube](https://badges.aleen42.com/src/youtube.svg)](https://www.youtube.com/watch?v=4BIbQt-EIAM)
- • 🌐 <a href="https://zhuanlan.zhihu.com/p/684785925" target="_blank">Chinese Blog</a>
--->
 This repository hosts the code, data, and model weights of **OpenCity**.
 
 -----
-## 🎉 News 
-- [x] [2024.08.21] Release the full paper.
-- [x] [2024.08.20] Add video.
-- [x] [2024.08.15] 🚀🚀 Release the code, model weights and datasets of OpenCity.
-- [x] [2024.08.15] Release baselines codes.
 
 
 🎯🎯📢📢 We upload the **models** and **data** used in our OpenCity on 🤗 **Huggingface**. We highly recommend referring to the table below for further details: 
@@ -33,8 +18,6 @@ This repository hosts the code, data, and model weights of **OpenCity**.
 | [https://huggingface.co/hkuds/OpenCity-Plus](https://huggingface.co/hkuds/OpenCity-Plus/tree/main) | It's the model weights of our OpenCity-Plus. |
 | [https://huggingface.co/datasets/hkuds/OpenCity-dataset/tree/main](https://huggingface.co/datasets/hkuds/OpenCity-dataset/tree/main) | We released the datasets used in OpenCity. |
 
-## 👉 TODO 
-...
 
 
 -----------
@@ -56,33 +39,6 @@ Experimental results demonstrate that OpenCity exhibits exceptional zero-shot pr
  
 ![Zero-shot vs. Full-shot.](https://github.com/OpenCity-ST/OpenCity-ST.github.io/blob/main/images/zero-shot.png)
 
-
-
-### Demo Video
-https://github.com/user-attachments/assets/39265dc5-0126-483b-951e-518c6cb210e0
-
------------
-<span id='Usage'/>
-
-## Getting Started
-
-<span id='all_catelogue'/>
-
-### Table of Contents:
-* <a href='#Code Structure'>1. Code Structure</a>
-* <a href='#Environment'>2. Environment </a>
-* <a href='#Training OpenCity'>3. Training OpenCity </a>
-  * <a href='#Preparing Pre-trained Data'>3.1. Preparing Pre-trained Data </a>
-  * <a href='#Pre-training'>3.2. Pre-training </a>
-* <a href='#Evaluating'>4. Evaluating </a>
-  * <a href='#Zero-shot'>4.1. Zero-shot Evaluation (`test` mode)</a>
-  * <a href='#Fast-Adaptation'>4.2. Fast Adaptation (`eval` mode)</a>
-  * <a href='#Supervised'>4.3. Supervised Training from Scratch (`ori` mode)</a>
-  * <a href='#ICT'>4.4. In-Context Traffic Forecasting (`ict` mode)</a>
-****
-
-
-<span id='Code Structure'/>
 
 ### 1. Code Structure <a href='#all_catelogue'>[Back to Top]</a>
 

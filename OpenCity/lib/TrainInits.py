@@ -16,7 +16,10 @@ def init_seed(seed, seed_mode):
     random.seed(seed)
 
 def init_device(opt):
-    if torch.cuda.is_available():
+    if opt.use_cpu:
+        opt.cuda = False
+        opt.device = 'cpu'
+    elif torch.cuda.is_available():
         opt.cuda = True
         torch.cuda.set_device(int(opt.device[5]))
     else:

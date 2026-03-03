@@ -13,6 +13,7 @@ def parse_args(device):
     args.add_argument('-device', default=device, type=str, help='indices of GPUs')
     args.add_argument('-model', default='TGCN', type=str)
     args.add_argument('-cuda', default=True, type=bool)
+    args.add_argument('-use_cpu', default=False, type=eval, help='Force CPU mode even when CUDA is available')
 
     args_get, _ = args.parse_known_args()
 
@@ -70,5 +71,16 @@ def parse_args(device):
                       help='Number of independent demo sets (S) to average at test time')
     args.add_argument('-demo_selection', default='random', type=str,
                       help='Demo selection strategy: random, recent, similar')
+    # ICT learned aggregation parameters
+    args.add_argument('-ict_mode', default='residual', type=str,
+                      choices=['residual', 'learned'],
+                      help='ICT mode: residual (average) or learned (aggregator)')
+    args.add_argument('-aggregator_type', default='attention', type=str,
+                      choices=['simple', 'attention'],
+                      help='Demo aggregator: simple (cosine) or attention (cross-attn)')
+    args.add_argument('-aggregator_epochs', default=5, type=int,
+                      help='Epochs to train demo aggregator')
+    args.add_argument('-aggregator_lr', default=1e-4, type=float,
+                      help='Learning rate for aggregator training')
     args, _ = args.parse_known_args()
     return args

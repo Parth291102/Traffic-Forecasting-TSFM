@@ -26,6 +26,11 @@ num_nodes_dict = {'PEMS04': 307, 'PEMS08': 170, 'PEMS07': 883, 'CD_DIDI': 524, '
                   }
 
 args = parse_args(device)
+# Override device if -use_cpu is set
+if args.use_cpu:
+    args.device = 'cpu'
+    args.cuda = False
+    print('Forced CPU mode via -use_cpu flag')
 args.num_nodes_dict = num_nodes_dict
 args_predictor = get_predictor_params(args)
 attr_list = []
@@ -60,7 +65,7 @@ train_dataloader, val_dataloader, test_dataloader, scaler_dict = define_datalode
 
 #init model
 model = Network_Predict(args, args_predictor)
-if torch.cuda.device_count() > 1:
+if str(args.device) != 'cpu' and torch.cuda.device_count() > 1:
     model = nn.DataParallel(model)
 model = model.to(args.device)
 
@@ -134,10 +139,10 @@ if args.mode == 'pretrain' or args.mode == 'ori':
     trainer.multi_train()
 elif args.mode == 'eval':
     path = log_dir + '/' + args.load_pretrain_path
-    if torch.cuda.device_count() > 1:
-        model.load_state_dict(torch.load(path))
+    if str(args.device) != 'cpu' and torch.cuda.device_count() > 1:
+        model.load_state_dict(torch.load(path, map_location=args.device))
     else:
-        model_weights = {k.replace('module.', ''): v for k, v in torch.load(path).items()}
+        model_weights = {k.replace('module.', ''): v for k, v in torch.load(path, map_location=args.device).items()}
         model.load_state_dict(model_weights)
     print("Load saved model")
     for param in model.parameters():
@@ -155,16 +160,28 @@ elif args.mode == 'ict':
 
     # Load pretrained model
     path = log_dir + '/' + args.load_pretrain_path
-    if torch.cuda.device_count() > 1:
-        model.load_state_dict(torch.load(path))
+    if str(args.device) != 'cpu' and torch.cuda.device_count() > 1:
+        model.load_state_dict(torch.load(path, map_location=args.device))
     else:
-        model_weights = {k.replace('module.', ''): v for k, v in torch.load(path).items()}
+        model_weights = {k.replace('module.', ''): v for k, v in torch.load(path, map_location=args.device).items()}
         model.load_state_dict(model_weights)
     print("Loaded pretrained model for ICT inference")
 
     # Freeze all parameters (zero-training)
     for param in model.parameters():
         param.requires_grad = False
+
+    # If learned mode, initialize aggregator and load weights
+    if args.ict_mode == 'learned':
+        predictor = model.module.predictor if hasattr(model, 'module') else model.predictor
+        aggregator = predictor.init_demo_aggregator(args.aggregator_type)
+        aggregator = aggregator.to(args.device)
+        agg_path = os.path.join(log_dir, 'aggregator_best.pth')
+        if os.path.exists(agg_path):
+            aggregator.load_state_dict(torch.load(agg_path, map_location=args.device))
+            print(f"Loaded aggregator weights from {agg_path}")
+        else:
+            print(f"WARNING: aggregator weights not found at {agg_path}, using random init")
 
     # No bfloat16 needed: residual correction uses standard 24-patch forward
     # (each forward is the same size as zero-shot, no VRAM increase)
@@ -176,7 +193,33 @@ elif args.mode == 'ict':
     # Run ICT test
     trainer.test_ict(
         model, args, scaler_dict_ict, test_dataloader_ict, trainer.logger,
-        num_prefix_selections=args.num_prefix_selections
+        num_prefix_selections=args.num_prefix_selections,
+        ict_mode=args.ict_mode
     )
+elif args.mode == 'ict_train_aggregator':
+    from lib.ict_data_process import define_ict_dataloader
+
+    # Load pretrained base model
+    path = log_dir + '/' + args.load_pretrain_path
+    if str(args.device) != 'cpu' and torch.cuda.device_count() > 1:
+        model.load_state_dict(torch.load(path, map_location=args.device))
+    else:
+        model_weights = {k.replace('module.', ''): v for k, v in torch.load(path, map_location=args.device).items()}
+        model.load_state_dict(model_weights)
+    print("Loaded pretrained model for aggregator training")
+
+    # Create ICT dataloaders (train + val + test)
+    train_dl_ict, val_dl_ict, test_dl_ict, scaler_dict_ict = define_ict_dataloader(args)
+
+    # Create trainer with ICT dataloaders
+    trainer_ict = Trainer(model, loss, optimizer, train_dl_ict, val_dl_ict,
+                          test_dl_ict, scaler_dict_ict, args, scheduler=scheduler)
+
+    # Train aggregator only (base model frozen)
+    trainer_ict.train_aggregator()
+
+    # Test with learned aggregation
+    trainer_ict.test_ict(model, args, scaler_dict_ict, test_dl_ict,
+                         trainer_ict.logger, ict_mode='learned')
 else:
     raise ValueError

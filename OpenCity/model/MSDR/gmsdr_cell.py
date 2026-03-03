@@ -4,8 +4,6 @@ from torch import nn, Tensor
 import torch.nn.functional as F
 from .args import calculate_scaled_laplacian, calculate_random_walk_matrix, calculate_normalized_laplacian, calculate_reverse_random_walk_matrix
 
-device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-
 class Seq2SeqAttrs:
     def __init__(self, adj_mx, args):
         self.adj_mx = adj_mx
@@ -31,7 +29,7 @@ class LayerParams:
 
     def get_weights(self, shape):
         if shape not in self._params_dict:
-            nn_param = torch.nn.Parameter(torch.empty(*shape, device=device))
+            nn_param = torch.nn.Parameter(torch.empty(*shape))
             torch.nn.init.xavier_normal_(nn_param)
             self._params_dict[shape] = nn_param
             self._rnn_network.register_parameter('{}_weight_{}'.format(self._type, str(shape)),
@@ -40,7 +38,7 @@ class LayerParams:
 
     def get_biases(self, length, bias_start=0.0):
         if length not in self._biases_dict:
-            biases = torch.nn.Parameter(torch.empty(length, device=device))
+            biases = torch.nn.Parameter(torch.empty(length))
             torch.nn.init.constant_(biases, bias_start)
             self._biases_dict[length] = biases
             self._rnn_network.register_parameter('{}_biases_{}'.format(self._type, str(length)),
@@ -74,8 +72,9 @@ class GMSDRCell(torch.nn.Module):
         self.pre_k = pre_k
         self.pre_v = pre_v
         self.input_dim = input_dim
-        self.nodevec1 = nn.Parameter(torch.randn(num_nodes, 10).to(device), requires_grad=True).to(device)
-        self.nodevec2 = nn.Parameter(torch.randn(10, num_nodes).to(device), requires_grad=True).to(device)
+        self._device = device
+        self.nodevec1 = nn.Parameter(torch.randn(num_nodes, 10), requires_grad=True)
+        self.nodevec2 = nn.Parameter(torch.randn(10, num_nodes), requires_grad=True)
 
         supports = []
         if filter_type == "laplacian":
@@ -97,13 +96,12 @@ class GMSDRCell(torch.nn.Module):
         self.R = nn.Parameter(torch.zeros(pre_k, num_nodes, self._num_units), requires_grad=True)
         self.attlinear = nn.Linear(num_nodes * self._num_units, 1)
 
-    @staticmethod
-    def _build_sparse_matrix(L):
+    def _build_sparse_matrix(self, L):
         L = L.tocoo()
         indices = np.column_stack((L.row, L.col))
         # this is to ensure row-major ordering to equal torch.sparse.sparse_reorder(L)
         indices = indices[np.lexsort((indices[:, 0], indices[:, 1]))]
-        L = torch.sparse_coo_tensor(indices.T, L.data, L.shape, device=device)
+        L = torch.sparse_coo_tensor(indices.T, L.data, L.shape, device=self._device)
         return L
 
     def forward(self, inputs, hx_k):

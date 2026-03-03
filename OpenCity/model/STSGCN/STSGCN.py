@@ -14,10 +14,10 @@ class PositionEmbedding(nn.Module):
         self.embedding_size = embedding_size
         self.temporal = temporal
         self.spatial = spatial
-        self.temporal_emb = torch.nn.Parameter(torch.zeros((1, input_length, 1, embedding_size)).to('cuda:0'))
+        self.temporal_emb = torch.nn.Parameter(torch.zeros((1, input_length, 1, embedding_size)))
         # shape is (1, T, 1, C)
         # xavier_uniform(self.temporal_emb)
-        self.spatial_emb = torch.nn.Parameter(torch.zeros((1, 1, num_of_vertices, embedding_size)).to('cuda:0'))
+        self.spatial_emb = torch.nn.Parameter(torch.zeros((1, 1, num_of_vertices, embedding_size)))
         # shape is (1, 1, N, C)
         # xavier_uniform(self.spatial_emb)
 

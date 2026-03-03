@@ -322,6 +322,17 @@ class OpenCity(nn.Module):
         self.flatten = nn.Flatten(start_dim=-2)
         self.linear = nn.Linear(24*self.skip_dim, self.output_window)
 
+        # ICT learned aggregation (lazily initialized via init_demo_aggregator)
+        self.demo_aggregator = None
+
+    def init_demo_aggregator(self, aggregator_type='attention'):
+        """Initialize demo aggregator for learned ICT mode."""
+        from .DemoAggregator import SimpleDemoAggregator, DemoAggregator
+        if aggregator_type == 'attention':
+            self.demo_aggregator = DemoAggregator(self.embed_dim, num_heads=4)
+        else:
+            self.demo_aggregator = SimpleDemoAggregator(self.embed_dim)
+        return self.demo_aggregator
 
     def forward(self, input, lbls, select_dataset):
 
@@ -418,3 +429,99 @@ class OpenCity(nn.Module):
         pred_corrected = pred_query + avg_residual  # [B, T, N, 1]
 
         return pred_corrected
+
+    def _forward_with_features(self, input, lbls, select_dataset):
+        """Standard forward that also returns encoder features for the aggregator.
+
+        Returns:
+            prediction: [B, T, N, 1] — same as forward()
+            enc_feat:   [B, N, D]    — encoder output mean-pooled over patches
+        """
+        bs, time_steps, num_nodes, num_feas = input.size()
+        x = input
+
+        # Spatio-Temporal Context Encoding
+        TCH = input[..., self.output_dim:].long()
+        TCP = lbls[..., self.output_dim:].long()
+        feas_all_his, feas_all_pre = self.patch_embedding_time(torch.cat([TCH, TCP], dim=-1))
+        spa_feas = self.spatial_embedding(self.lap_mx_dict[select_dataset].to(self.device)).repeat(bs, feas_all_his.shape[1], 1, 1)
+        feas_all_his = feas_all_his + spa_feas
+        feas_all_pre = feas_all_pre + spa_feas
+
+        # IN
+        x_in = x[..., :self.output_dim]
+        means = x_in.mean(1, keepdim=True).detach()
+        x_in = x_in - means
+        stdev = torch.sqrt(torch.var(x_in, dim=1, keepdim=True, unbiased=False) + 1e-5).detach()
+        x_in /= stdev
+
+        # Patch Embedding
+        enc = self.patch_embedding_flow(x_in)
+
+        # adj
+        adj = self.adj_mx_dict[select_dataset].to(self.device)
+
+        # Spatio-Temporal Dependencies Modeling
+        for i, encoder_block in enumerate(self.encoder_blocks):
+            enc = encoder_block(enc, enc, enc, feas_all_his, feas_all_pre, adj, self.geo_mask_dict[select_dataset].to(self.device), self.sem_mask)
+
+        # Extract encoder features: mean pool over patches → [B, N, D]
+        enc_feat = enc.mean(dim=1)
+
+        # Prediction head
+        skip = enc.permute(0, 2, 3, 1).contiguous()
+        skip = self.flatten(skip)
+        skip = self.linear(skip).transpose(1, 2).unsqueeze(-1)
+        skip = skip[:, :time_steps, :, :]
+
+        # DeIN
+        skip = skip * stdev
+        skip = skip + means
+
+        return skip, enc_feat
+
+    def forward_ict_learned(self, input, lbls, demos_x, demos_y, select_dataset):
+        """ICT forward pass with learned demo aggregation.
+
+        Instead of naive averaging of residuals, uses a DemoAggregator to
+        compute attention-weighted corrections based on query-demo similarity.
+
+        Args:
+            input:   [B, T, N, F]     — query history
+            lbls:    [B, T, N, F]     — query future (temporal features)
+            demos_x: [B, K, T, N, F]  — demonstration histories
+            demos_y: [B, K, T, N, F]  — demonstration futures (GT flow + temporal)
+            select_dataset: str
+
+        Returns:
+            [B, T, N, 1] — corrected prediction
+        """
+        bs, time_steps, num_nodes, num_feas = input.size()
+        K = demos_x.shape[1]
+        assert demos_x.dim() == 5, f"demos_x must be [B, K, T, N, F], got {demos_x.shape}"
+
+        if K == 0:
+            return self.forward(input, lbls, select_dataset)
+
+        # Query forward with features
+        pred_query, query_feat = self._forward_with_features(input, lbls, select_dataset)
+
+        # Demo forwards with features
+        demo_feats_list = []
+        corrections_list = []
+        for k in range(K):
+            dk_x = demos_x[:, k]
+            dk_y = demos_y[:, k]
+            dk_gt_flow = dk_y[..., :self.output_dim]  # [B, T, N, 1]
+            dk_pred, dk_feat = self._forward_with_features(dk_x, dk_y, select_dataset)
+            corrections_list.append(dk_gt_flow - dk_pred)
+            demo_feats_list.append(dk_feat)
+
+        # Stack: [B, K, N, D] and [B, K, T, N, 1]
+        demo_feats = torch.stack(demo_feats_list, dim=1)
+        corrections = torch.stack(corrections_list, dim=1)
+
+        # Learned aggregation
+        weighted_corr = self.demo_aggregator(query_feat, demo_feats, corrections)
+
+        return pred_query + weighted_corr
