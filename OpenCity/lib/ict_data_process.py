@@ -37,7 +37,7 @@ class ICTTrafficDataset(Dataset):
 
     def __init__(self, data, batch_size, input_window, output_window,
                  demo_pool, num_demonstrations=1, num_prefix_selections=1,
-                 demo_selection='random', eval_only=False):
+                 demo_selection='random', eval_only=False, exclude_overlap=False):
         """
         Args:
             data:          numpy array [T_total, N, F] for this split
@@ -48,6 +48,9 @@ class ICTTrafficDataset(Dataset):
             num_demonstrations: K — number of demo pairs per query
             num_prefix_selections: S — number of independent demo sets
             eval_only:     if True, don't shuffle / drop_last
+            exclude_overlap: if True, exclude demo pool entries that temporally
+                             overlap with the query window (prevents data leakage
+                             when query and demo pools share the same data split)
         """
         self.input_window = input_window
         self.output_window = output_window
@@ -67,6 +70,11 @@ class ICTTrafficDataset(Dataset):
         self.demo_selection = demo_selection
         self.num_demonstrations = num_demonstrations
         self.num_prefix_selections = num_prefix_selections
+        self._exclude_overlap = exclude_overlap
+        # Minimum gap between query start and demo start to avoid data overlap.
+        # A query window spans [start, start + iw + ow). Any demo whose window
+        # overlaps this range shares data and must be excluded.
+        self._min_gap = input_window + output_window
 
         # Create sliding windows (same as TrafficDataset) but also record
         # the start index of each window to support "recent" selection.
@@ -98,7 +106,13 @@ class ICTTrafficDataset(Dataset):
                 self._demo_hist_flat = np.stack(demo_hists).reshape(len(self.demo_pool), -1)
                 # only build a KNN index if the selection strategy relies on similarity
                 if self.demo_selection == 'similar':
-                    self._knn = NearestNeighbors(n_neighbors=min(num_demonstrations, len(self.demo_pool)), metric='euclidean')
+                    # Request extra neighbors to compensate for overlap exclusion.
+                    # Overlapping windows span ~2*min_gap indices in the pool,
+                    # so we request K + that margin to ensure enough valid demos.
+                    knn_k = min(num_demonstrations, len(self.demo_pool))
+                    if self._exclude_overlap:
+                        knn_k = min(knn_k + 2 * self._min_gap, len(self.demo_pool))
+                    self._knn = NearestNeighbors(n_neighbors=knn_k, metric='euclidean')
                     self._knn.fit(self._demo_hist_flat)
                 else:
                     self._knn = None
@@ -113,6 +127,25 @@ class ICTTrafficDataset(Dataset):
 
     def __len__(self):
         return len(self.batches)
+
+    def _filter_overlapping(self, indices, query_start_idx):
+        """Remove demo pool indices whose windows overlap with the query.
+
+        Two windows overlap when |demo_start - query_start| < min_gap
+        (i.e. the demo's [start, start+iw+ow) range intersects the query's).
+
+        Args:
+            indices: np.array of demo pool indices
+            query_start_idx: start index of the query window
+
+        Returns:
+            np.array of non-overlapping indices
+        """
+        if not self._exclude_overlap or len(indices) == 0:
+            return indices
+        demo_starts = self._demo_indices[indices]
+        mask = np.abs(demo_starts - query_start_idx) >= self._min_gap
+        return indices[mask]
 
     def __getitem__(self, idx):
         batch_pairs = self.batches[idx]
@@ -140,18 +173,23 @@ class ICTTrafficDataset(Dataset):
 
                 # choose demo indices depending on selection strategy
                 if self.demo_selection == 'similar' and self._knn is not None and demo_pool_size > 0:
-                    # Query KNN for nearest neighbors
-                    k_query = min(K, demo_pool_size)
-                    _, indices_array = self._knn.kneighbors(query_flat.reshape(1, -1), n_neighbors=k_query)
-                    indices_base = indices_array[0]
-                    if K > demo_pool_size:
-                        reps = int(np.ceil(float(K) / float(demo_pool_size)))
+                    # Query KNN for nearest neighbors (extra if overlap exclusion)
+                    knn_k = self._knn.n_neighbors
+                    _, indices_array = self._knn.kneighbors(query_flat.reshape(1, -1), n_neighbors=knn_k)
+                    candidates = indices_array[0]
+                    # Exclude overlapping windows
+                    candidates = self._filter_overlapping(candidates, batch_idx[b])
+                    indices_base = candidates[:K]
+                    if len(indices_base) < K and len(indices_base) > 0:
+                        reps = int(np.ceil(float(K) / float(len(indices_base))))
                         indices_base = np.tile(indices_base, reps)[:K]
                 elif self.demo_selection == 'recent' and demo_pool_size > 0:
                     # select demos whose start index is just before query start
                     start_idx = batch_idx[b]
                     # find demo_pool entries with index < start_idx
                     valid = np.where(self._demo_indices < start_idx)[0]
+                    # Exclude overlapping windows
+                    valid = self._filter_overlapping(valid, batch_idx[b])
                     if len(valid) > 0:
                         # take the most recent ones (largest indices)
                         choose = valid[np.argsort(self._demo_indices[valid])][-K:]
@@ -166,10 +204,17 @@ class ICTTrafficDataset(Dataset):
                     # random sampling (also covers cases where pool is empty or
                     # KNN not built or 'random' strategy selected)
                     if demo_pool_size > 0:
-                        indices_base = np.array(random.sample(range(demo_pool_size), min(K, demo_pool_size)))
-                        if K > demo_pool_size:
-                            reps = int(np.ceil(float(K) / float(demo_pool_size)))
-                            indices_base = np.tile(indices_base, reps)[:K]
+                        all_indices = np.arange(demo_pool_size)
+                        # Exclude overlapping windows
+                        all_indices = self._filter_overlapping(all_indices, batch_idx[b])
+                        if len(all_indices) > 0:
+                            indices_base = np.array(random.sample(
+                                list(all_indices), min(K, len(all_indices))))
+                            if K > len(all_indices):
+                                reps = int(np.ceil(float(K) / float(len(all_indices))))
+                                indices_base = np.tile(indices_base, reps)[:K]
+                        else:
+                            indices_base = np.array([])
                     else:
                         indices_base = np.array([])
 
@@ -251,11 +296,14 @@ def define_ict_dataloader(args):
         # Create datasets
         # Train/val: S=1 (single demo selection)
         # Test: S=num_prefix_selections (for variance reduction averaging)
+        # exclude_overlap=True for train: query and demo_pool share the same
+        # data split, so overlapping windows must be excluded to prevent the
+        # aggregator from learning trivial identity corrections.
         train_ds = ICTTrafficDataset(
             data_train, args.batch_size, iw, ow,
             demo_pool, args.num_demonstrations,
             num_prefix_selections=1, demo_selection=args.demo_selection,
-            eval_only=False)
+            eval_only=False, exclude_overlap=True)
         val_ds = ICTTrafficDataset(
             data_val, args.batch_size, iw, ow,
             demo_pool, args.num_demonstrations,
