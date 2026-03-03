@@ -322,6 +322,9 @@ class OpenCity(nn.Module):
         self.flatten = nn.Flatten(start_dim=-2)
         self.linear = nn.Linear(24*self.skip_dim, self.output_window)
 
+        # placeholder for learned ICT aggregator (variant A)
+        self.demo_aggregator = None  # instantiated lazily via init_demo_aggregator
+
 
     def forward(self, input, lbls, select_dataset):
 
@@ -363,6 +366,102 @@ class OpenCity(nn.Module):
         skip = skip + means
 
         return skip
+
+    def init_demo_aggregator(self, aggregator_type='simple'):
+        """Initialize and return the requested demo aggregator.
+
+        Only the ``simple`` variant (cosine-similarity) is implemented for
+        Variant A. The argument is kept for API compatibility; passing any
+        other value will raise ``ValueError``.
+        """
+        from .DemoAggregator import SimpleDemoAggregator
+
+        if aggregator_type != 'simple':
+            raise ValueError(f"Unsupported aggregator_type {aggregator_type}; only 'simple' is available")
+        if self.demo_aggregator is None:
+            self.demo_aggregator = SimpleDemoAggregator(self.embed_dim)
+        return self.demo_aggregator
+
+    def _forward_with_features(self, input, lbls, select_dataset):
+        """Compute prediction and encoder features for a single input.
+
+        This duplicates ``forward``'s logic but additionally returns the
+        mean-pooled encoder representation used by the aggregator.
+        """
+        bs, time_steps, num_nodes, num_feas = input.size()
+        x = input
+        # Spatio-Temporal Context Encoding
+        TCH = input[..., self.output_dim:].long()
+        TCP = lbls[..., self.output_dim:].long()
+        feas_all_his, feas_all_pre = self.patch_embedding_time(torch.cat([TCH, TCP], dim=-1))
+        spa_feas = self.spatial_embedding(self.lap_mx_dict[select_dataset].to(self.device)).repeat(bs, feas_all_his.shape[1], 1, 1)
+        feas_all_his = feas_all_his + spa_feas
+        feas_all_pre = feas_all_pre +spa_feas
+
+        # IN
+        x_in = x[..., :self.output_dim]
+        means = x_in.mean(1, keepdim=True).detach()
+        x_in = x_in - means
+        stdev = torch.sqrt(torch.var(x_in, dim=1, keepdim=True, unbiased=False)+ 1e-5).detach()
+        x_in /= stdev
+
+        # Patch Embedding
+        enc = self.patch_embedding_flow(x_in)
+
+        # adj
+        adj = self.adj_mx_dict[select_dataset].to(self.device)
+
+        # Spatio-Temporal Dependencies Modeling
+        for i, encoder_block in enumerate(self.encoder_blocks):
+            enc = encoder_block(enc, enc, enc, feas_all_his, feas_all_pre, adj, self.geo_mask_dict[select_dataset].to(self.device), self.sem_mask)
+
+        # extract features (mean pool over patches)
+        enc_feat = enc.mean(dim=1)  # [B, N, D]
+
+        # Prediction head
+        skip = enc.permute(0, 2, 3, 1).contiguous()
+        skip = self.flatten(skip)
+        skip = self.linear(skip).transpose(1, 2).unsqueeze(-1)
+        skip = skip[:, :time_steps, :, :]
+
+        # DeIN
+        skip = skip * stdev
+        skip = skip + means
+
+        return skip, enc_feat
+
+    def forward_ict_learned(self, input, lbls, demos_x, demos_y, select_dataset):
+        """ICT forward pass that uses a learned demo aggregator (Variant A).
+
+        The base model remains frozen; only the aggregator's parameters are
+        trained. This method mirrors ``forward_ict`` but routes the residuals
+        through ``self.demo_aggregator`` instead of averaging.
+        """
+        K = demos_x.shape[1]
+        if K == 0:
+            return self.forward(input, lbls, select_dataset)
+
+        # 1. query
+        pred_query, query_feat = self._forward_with_features(input, lbls, select_dataset)
+
+        demo_feats_list = []
+        corrections_list = []
+        for k in range(K):
+            dk_pred, dk_feat = self._forward_with_features(
+                demos_x[:, k], demos_y[:, k], select_dataset)
+            dk_gt = demos_y[:, k, ..., :self.output_dim]
+            corrections_list.append(dk_gt - dk_pred)
+            demo_feats_list.append(dk_feat)
+
+        demo_feats = torch.stack(demo_feats_list, dim=1)      # [B,K,N,D]
+        corrections = torch.stack(corrections_list, dim=1)    # [B,K,T,N,1]
+
+        if self.demo_aggregator is None:
+            raise RuntimeError("demo_aggregator has not been initialized. "
+                               "Call init_demo_aggregator before training or inference.")
+        weighted_corr = self.demo_aggregator(query_feat, demo_feats, corrections)
+
+        return pred_query + weighted_corr
 
     def forward_ict(self, input, lbls, demos_x, demos_y, select_dataset):
         """

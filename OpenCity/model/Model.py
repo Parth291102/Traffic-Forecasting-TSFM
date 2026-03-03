@@ -54,12 +54,17 @@ class Traffic_model(nn.Module):
             raise ValueError
 
     def forward(self, source, label, select_dataset, batch_seen=None,
-                demos_x=None, demos_y=None):
+                demos_x=None, demos_y=None, ict_mode='residual'):
         if self.model == 'OpenCity':
             if demos_x is not None:
-                x_predic = self.predictor.forward_ict(
-                    source, label, demos_x, demos_y, select_dataset
-                )
+                if ict_mode == 'learned':
+                    x_predic = self.predictor.forward_ict_learned(
+                        source, label, demos_x, demos_y, select_dataset
+                    )
+                else:
+                    x_predic = self.predictor.forward_ict(
+                        source, label, demos_x, demos_y, select_dataset
+                    )
             else:
                 x_predic = self.predictor(source, label, select_dataset)
         else:

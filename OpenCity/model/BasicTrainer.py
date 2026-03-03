@@ -176,15 +176,88 @@ class Trainer(object):
 
         logger.info("Average Horizon, MAE: {:.2f}, RMSE: {:.2f}, MAPE: {:.4f}%, CORR:{:.4f}".format(
             mae, rmse, mape * 100, corr))
+    def train_aggregator(self):
+        """Train only the demo aggregation module (variant A).
+
+        The base model weights are frozen and an ``nn.Adam`` optimizer is
+        created for the aggregator parameters. Training/validation loops follow
+        the same structure as :meth:`multi_train` but expect the dataloader to
+        yield demo batches (as produced by ``define_ict_dataloader``).
+        """
+        # freeze base model
+        for param in self.model.parameters():
+            param.requires_grad = False
+
+        predictor = self.model.predictor
+        aggregator = predictor.init_demo_aggregator(self.args.aggregator_type)
+        aggregator = aggregator.to(self.args.device)
+        for param in aggregator.parameters():
+            param.requires_grad = True
+
+        optimizer = torch.optim.Adam(aggregator.parameters(), lr=self.args.aggregator_lr)
+
+        best_loss = float('inf')
+        best_state = None
+        for epoch in range(self.args.aggregator_epochs):
+            self.model.train()
+            total_loss = 0
+            for batch_data in self.train_dataloader:
+                inputs, targets, demos_x, demos_y = batch_data
+                inputs = inputs.squeeze(0).to(self.args.device)
+                targets = targets.squeeze(0).to(self.args.device)
+                demos_x = demos_x.squeeze(0).to(self.args.device)
+                demos_y = demos_y.squeeze(0).to(self.args.device)
+                select_dataset = get_key_from_value(self.num_nodes_dict, inputs.shape[2])
+
+                output = self.model(inputs, targets, select_dataset,
+                                    demos_x=demos_x[:, 0], demos_y=demos_y[:, 0],
+                                    ict_mode='learned')
+                optimizer.zero_grad()
+                loss = self.loss(output, targets[..., :self.args.output_dim], self.scaler_dict[select_dataset])
+                loss.backward()
+                optimizer.step()
+                total_loss += loss.item()
+
+            val_loss = self._val_aggregator_epoch()
+            self.logger.info(f"Aggregator epoch {epoch} val_loss={val_loss:.6f}")
+            if val_loss < best_loss:
+                best_loss = val_loss
+                best_state = copy.deepcopy(aggregator.state_dict())
+
+        # save best aggregator
+        torch.save(best_state, os.path.join(self.args.log_dir, 'aggregator_best.pth'))
+        self.logger.info(f"Saved aggregator weights to {self.args.log_dir}/aggregator_best.pth")
+
+    def _val_aggregator_epoch(self):
+        self.model.eval()
+        total_val_loss = 0
+        with torch.no_grad():
+            for batch_data in self.val_dataloader:
+                inputs, targets, demos_x, demos_y = batch_data
+                inputs = inputs.squeeze(0).to(self.args.device)
+                targets = targets.squeeze(0).to(self.args.device)
+                demos_x = demos_x.squeeze(0).to(self.args.device)
+                demos_y = demos_y.squeeze(0).to(self.args.device)
+                select_dataset = get_key_from_value(self.num_nodes_dict, inputs.shape[2])
+                output = self.model(inputs, targets, select_dataset,
+                                    demos_x=demos_x[:, 0], demos_y=demos_y[:, 0],
+                                    ict_mode='learned')
+                loss_pred = self.loss(output, targets[..., :self.args.output_dim], self.scaler_dict[select_dataset])
+                if not torch.isnan(loss_pred):
+                    total_val_loss += loss_pred.item()
+        val_loss = total_val_loss / len(self.val_dataloader)
+        return val_loss
+
     @staticmethod
     def test_ict(model, args, scaler_dict, test_dataloader, logger, path=None,
-                 num_prefix_selections=1):
+                 num_prefix_selections=1, ict_mode='residual'):
         """
         ICT inference: pure forward pass with demonstrations, no gradient updates.
 
         Args:
             num_prefix_selections: number of random demo sets (S) to average over
                                    (reduces variance from demo selection)
+            ict_mode: "residual" or "learned" aggregator mode
         """
         # Load pretrained weights
         if path is not None:
@@ -235,7 +308,8 @@ class Trainer(object):
                     with torch.autocast(device_type='cuda', dtype=amp_dtype, enabled=use_amp):
                         output_s = model(inputs_m, targets_m, select_dataset,
                                          demos_x=demos_x_m[:, s],    # [B, K, T, N, F]
-                                         demos_y=demos_y_m[:, s])     # [B, K, T, N, F]
+                                         demos_y=demos_y_m[:, s],
+                                         ict_mode=ict_mode)
                     outputs.append(output_s.float())  # cast back to float32 for metrics
                 output = torch.stack(outputs).mean(dim=0)        # [B, T, N, 1]
 

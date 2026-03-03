@@ -150,6 +150,33 @@ elif args.mode == 'test':
     print_model_parameters(model, only_num=False)
     print("Load saved model")
     trainer.test(model, trainer.args, scaler_dict, test_dataloader, trainer.logger, path=log_dir + '/' + args.load_pretrain_path)
+elif args.mode == 'ict_train_aggregator':
+    from lib.ict_data_process import define_ict_dataloader
+
+    # Load pretrained base model
+    path = log_dir + '/' + args.load_pretrain_path
+    if torch.cuda.device_count() > 1:
+        model.load_state_dict(torch.load(path))
+    else:
+        model_weights = {k.replace('module.', ''): v for k, v in torch.load(path).items()}
+        model.load_state_dict(model_weights)
+    print("Loaded pretrained model for ICT aggregator training")
+
+    # Create ICT dataloaders (train + val + test)
+    train_dl_ict, val_dl_ict, test_dl_ict, scaler_dict_ict = define_ict_dataloader(args)
+
+    trainer_ict = Trainer(model, loss, optimizer, train_dl_ict, val_dl_ict,
+                          test_dl_ict, scaler_dict_ict, args, scheduler=None)
+
+    # Train aggregator only
+    trainer_ict.train_aggregator()
+
+    # Test with learned aggregator
+    trainer_ict.test_ict(model, args, scaler_dict_ict, test_dl_ict,
+                         trainer_ict.logger,
+                         num_prefix_selections=args.num_prefix_selections,
+                         ict_mode='learned')
+
 elif args.mode == 'ict':
     from lib.ict_data_process import define_ict_dataloader
 
@@ -166,8 +193,18 @@ elif args.mode == 'ict':
     for param in model.parameters():
         param.requires_grad = False
 
-    # No bfloat16 needed: residual correction uses standard 24-patch forward
-    # (each forward is the same size as zero-shot, no VRAM increase)
+    # Optionally initialize and load aggregator if using learned mode
+    if args.ict_mode == 'learned':
+        predictor = model.predictor if not isinstance(model, nn.DataParallel) else model.module.predictor
+        agg = predictor.init_demo_aggregator(args.aggregator_type)
+        agg_path = os.path.join(args.log_dir, 'aggregator_best.pth')
+        if os.path.exists(agg_path):
+            agg.load_state_dict(torch.load(agg_path))
+            print(f"Loaded aggregator weights from {agg_path}")
+        else:
+            print(f"Warning: aggregator file {agg_path} not found")
+
+    # No bfloat16 needed for residual; learned aggregator also small
     print_model_parameters(model, only_num=False)
 
     # Create ICT dataloaders
@@ -176,7 +213,8 @@ elif args.mode == 'ict':
     # Run ICT test
     trainer.test_ict(
         model, args, scaler_dict_ict, test_dataloader_ict, trainer.logger,
-        num_prefix_selections=args.num_prefix_selections
-    )
+        num_prefix_selections=args.num_prefix_selections,
+        ict_mode=args.ict_mode)
+
 else:
     raise ValueError

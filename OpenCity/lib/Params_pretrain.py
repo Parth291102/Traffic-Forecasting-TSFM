@@ -70,5 +70,18 @@ def parse_args(device):
                       help='Number of independent demo sets (S) to average at test time')
     args.add_argument('-demo_selection', default='random', type=str,
                       help='Demo selection strategy: random, recent, similar')
+
+    # learned aggregation (Variant A) parameters
+    args.add_argument('-ict_mode', default='residual', type=str,
+                      choices=['residual', 'learned'],
+                      help='ICT mode: residual (average) or learned (aggregator)')
+    args.add_argument('-aggregator_type', default='simple', type=str,
+                      choices=['simple'],
+                      help='Demo aggregator type (only simple supported)')
+    args.add_argument('-aggregator_epochs', default=5, type=int,
+                      help='Epochs to train the demo aggregator')
+    args.add_argument('-aggregator_lr', default=1e-4, type=float,
+                      help='Learning rate for aggregator training')
+
     args, _ = args.parse_known_args()
     return args
