@@ -414,6 +414,10 @@ uv run python Run.py -mode ori -model OpenCity \
 
 Run zero-shot inference using **In-Context Traffic** (ICT): a pretrained model is loaded with all parameters frozen, and a set of demonstration (prefix) traffic sequences is prepended to the query to guide prediction — no gradient updates occur.
 
+ICT supports two modes controlled by `-ict_mode`:
+- **`residual`** (default): naive average of demo corrections — no training, no weight updates.
+- **`learned`**: uses a trained `DemoAggregator` module to weight demo corrections via cross-attention. Requires running `ict_train_aggregator` first to train the aggregator.
+
 ICT parameters (controlled via `conf/ICT/ICT.conf` or CLI flags):
 
 | Parameter | Default | Description |
@@ -421,6 +425,8 @@ ICT parameters (controlled via `conf/ICT/ICT.conf` or CLI flags):
 | `-num_demonstrations` | `1` | Number of demonstration pairs (K) prepended to each query |
 | `-num_prefix_selections` | `1` | Number of prefix candidates sampled per query |
 | `-demo_selection` | `random` | Strategy for selecting demonstrations (`random`) |
+| `-ict_mode` | `residual` | ICT correction mode: `residual` (naive average) or `learned` (trained aggregator) |
+| `-aggregator_type` | `attention` | Aggregator architecture: `simple` (cosine similarity, ~8K params) or `attention` (cross-attention, ~30K-200K params) |
 
 ```bash
 # First, edit conf/general_conf/pretrain.conf:
@@ -450,7 +456,61 @@ uv run python Run.py -mode ict -model OpenCity \
   --embed_dim 128 --skip_dim 128 --enc_depth 3
 ```
 
-> **What `ict` mode does**: Loads pretrained weights → freezes all parameters → builds ICT dataloaders with demonstration prefixes → runs inference via `test_ict()` (no training, no weight updates).
+> **What `ict` mode does**: Loads pretrained weights → freezes all parameters → builds ICT dataloaders with demonstration prefixes → runs inference via `test_ict()` (no training, no weight updates). When `-ict_mode learned`, it additionally loads a pre-trained `DemoAggregator` from `aggregator_best.pth` to weight demo corrections.
+
+#### 4.5 Learned Demo Aggregation (`ict_train_aggregator` mode)
+
+Train a lightweight `DemoAggregator` module that learns to weight demo corrections based on query-demo feature similarity.  The base model stays **fully frozen** — only the aggregator parameters (~30K-200K) are updated.
+
+Inspired by [In-Context Fine-Tuning for Time-Series Foundation Models (Das et al., 2024)](https://arxiv.org/abs/2410.24087): the model should **learn how to use demos** rather than naively averaging corrections.
+
+Aggregator training parameters:
+
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `-aggregator_type` | `attention` | `simple` (cosine similarity, ~8K params) or `attention` (cross-attention + gating, ~30K-200K params) |
+| `-aggregator_epochs` | `5` | Number of training epochs for the aggregator |
+| `-aggregator_lr` | `1e-4` | Learning rate for aggregator training |
+
+```bash
+# First, edit conf/general_conf/pretrain.conf:
+#   dataset_use = ['PEMS07M']   # single target dataset
+#   val_ratio = 0.1
+#   test_ratio = 0.4
+
+# ⚠️  Run from OpenCity/model/ (not the project root):
+cd /path/to/OpenCity/model
+
+# Step 1: Train the aggregator (base model frozen, CPU-friendly)
+uv run python Run.py -mode ict_train_aggregator -model OpenCity \
+  -load_pretrain_path OpenCity-plus.pth -batch_size 2 \
+  -num_demonstrations 3 -demo_selection knn \
+  -aggregator_type attention -aggregator_epochs 5 -aggregator_lr 1e-4 \
+  -use_cpu True \
+  --embed_dim 512 --skip_dim 512 --enc_depth 6
+
+# Step 2: Evaluate with learned aggregation
+uv run python Run.py -mode ict -model OpenCity \
+  -load_pretrain_path OpenCity-plus.pth -batch_size 2 \
+  -num_demonstrations 3 -demo_selection knn \
+  -ict_mode learned -aggregator_type attention \
+  -use_cpu True \
+  --embed_dim 512 --skip_dim 512 --enc_depth 6
+
+# Compare against baseline (naive averaging)
+uv run python Run.py -mode ict -model OpenCity \
+  -load_pretrain_path OpenCity-plus.pth -batch_size 2 \
+  -num_demonstrations 3 -demo_selection knn \
+  -ict_mode residual \
+  -use_cpu True \
+  --embed_dim 512 --skip_dim 512 --enc_depth 6
+```
+
+> **What `ict_train_aggregator` does**: Loads pretrained weights → freezes all base model parameters → initializes a `DemoAggregator` → trains aggregator on ICT training data with validation + early stopping → saves `aggregator_best.pth` → runs `test_ict` with `ict_mode='learned'`.
+
+The `DemoAggregator` module is defined in `model/OpenCity/DemoAggregator.py` and provides two variants:
+- **`SimpleDemoAggregator`**: cosine similarity between projected query and demo encoder features → per-node softmax weights → weighted correction sum. ~8K params.
+- **`DemoAggregator`**: multi-head cross-attention (query attends to demo features) → correction encoder → LayerNorm + FFN → sigmoid gate → attention-weighted corrections. ~30K-200K params depending on `embed_dim`.
 
 #### Summary of Modes
 
@@ -460,7 +520,8 @@ uv run python Run.py -mode ict -model OpenCity \
 | `test` | Pure inference, no training | None | Zero-shot & supervised evaluation |
 | `eval` | Efficient fine-tuning | Prediction head only (`linear` layer) | Fast adaptation to unseen data |
 | `ori` | Full supervised training | All | Baseline comparisons |
-| `ict` | In-context inference with demonstration prefixes | None | Zero-shot ICT evaluation |
+| `ict` | In-context inference with demonstration prefixes | None | Zero-shot ICT evaluation (residual or learned) |
+| `ict_train_aggregator` | Train learned demo aggregator | DemoAggregator only (~30K-200K params) | Train aggregator for learned ICT mode |
 
 <!--
 ## Contact

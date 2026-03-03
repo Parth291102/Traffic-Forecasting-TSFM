@@ -82,6 +82,45 @@ Replace random sampling with similarity-based retrieval so that the demo residua
 Traffic data has strong periodicity (daily period 288 steps, weekly period 2016 steps at 5-min intervals). Similarity-based retrieval is expected to reduce residual variance by aligning demo residuals with query error patterns.
 
 KNN-based retrieval substantially improves performance compared to random demo selection. With K=3 demonstrations, ICT nearly recovers zero-shot performance (MAE 4.66 vs 4.50 baseline), confirming that demo-query alignment — not residual correction itself — was the dominant bottleneck.
+
+### v4 Direction: Learned Demo Aggregation
+
+**Branch**: `xzhou38_ict_learned_aggregator`
+
+Replace the naive `(1/K) * sum(corrections)` with a **learned aggregation module** that weights each demo's correction based on query-demo feature similarity. Borrows the core insight from [Das et al., 2024 — In-Context Fine-Tuning for Time-Series Foundation Models](https://arxiv.org/abs/2410.24087): the model should learn how to use demos, rather than blindly averaging.
+
+```
+Current (v2/v3):
+  pred = f(query) + (1/K) * sum(GT_k - f(demo_k))              ← naive average
+
+v4:
+  pred = f(query) + Aggregator(query_enc, demo_encs, corrections)  ← learned weighting
+```
+
+**Architecture**: Base model stays fully frozen. A small `DemoAggregator` module (~30K-200K params) is added and trained separately. It takes:
+- `query_feat [B, N, D]`: encoder output of the query, mean-pooled over patches
+- `demo_feats [B, K, N, D]`: encoder outputs of the K demos
+- `corrections [B, K, T, N, 1]`: per-demo residual corrections (GT - pred)
+
+Two variants implemented:
+1. **SimpleDemoAggregator** (~8K params): cosine similarity → softmax weights → weighted correction sum
+2. **DemoAggregator** (~30K-200K params): multi-head cross-attention (query attends to demos) → correction encoder → LayerNorm + FFN → sigmoid gate → attention-weighted corrections
+
+**Why this should improve over naive averaging**:
+- Per-node, per-demo weights: each node assigns different importance to each demo
+- Demos more similar to query (in encoder feature space) receive higher weight
+- Learnable gating controls correction magnitude — can learn to suppress noisy demos
+- Combines well with KNN demo selection (v3): KNN provides aligned demos, aggregator further refines the weighting
+
+**Training cost**: CPU-feasible. Base model frozen → K+1 forward passes do not store intermediate activations. Backward pass only flows through the aggregator (~30K-200K params). Expected 5-10 epochs.
+
+**New files/changes** (see `docs/plan2_learned_demo_aggregation.md` for full implementation plan):
+- `model/OpenCity/DemoAggregator.py` (new): both aggregator classes
+- `model/OpenCity/OpenCity.py`: `init_demo_aggregator()`, `_forward_with_features()`, `forward_ict_learned()`
+- `model/Model.py`: `ict_mode` routing in `forward()`
+- `model/BasicTrainer.py`: `train_aggregator()`, `_val_aggregator_epoch()`, updated `test_ict(ict_mode=)`
+- `lib/Params_pretrain.py`: `-ict_mode`, `-aggregator_type`, `-aggregator_epochs`, `-aggregator_lr`
+- `model/Run.py`: `ict_train_aggregator` mode, updated `ict` mode for learned support
 ---
 
 ## Experiment 1: Zero-Shot Baseline (mode=test)
@@ -329,3 +368,45 @@ KNN-based retrieval substantially improves performance compared to random demo s
 | 9 | Residual K=1 KNN | 1 | 1 | fp32 | 5.61 | 10.04 | 14.23 | 0.625 | -25% | Done |
 | 10 | Residual K=3 KNN | 3 | 1 | fp32 | 4.66 | 8.11 | 11.92 | 0.729 | -3.6% | Done |
 | 11 | Residual K=1 S=10 KNN | 1 | 10 | fp32 | 5.61 | 10.04 | 14.23 | 0.625 | -25% | Done |
+| 12 | Learned Agg K=3 KNN (attention) | 3 | 1 | fp32 | TBD | TBD | TBD | TBD | TBD | PENDING |
+| 13 | Learned Agg K=3 KNN (simple) | 3 | 1 | fp32 | TBD | TBD | TBD | TBD | TBD | PENDING |
+
+---
+
+## Experiment 12: [PENDING] Learned Aggregation K=3, KNN, Attention Variant (fp32)
+
+| Field | Value |
+|-------|-------|
+| **Date** | TBD |
+| **Dataset** | PEMS07M (228 nodes, 5-min interval) |
+| **Approach** | v4 — learned demo aggregation (DemoAggregator, cross-attention + gating) |
+| **K** | 3 |
+| **S** | 1 |
+| **Demo Selection** | KNN similarity matching |
+| **Aggregator** | `attention` (~30K params with embed_dim=512) |
+| **Aggregator Training** | 5 epochs, lr=1e-4, base model frozen |
+| **Batch Size** | 2 |
+| **Precision** | float32 |
+| **Purpose** | Test whether learned per-node, per-demo weighting improves over naive averaging (Exp 10: MAE 4.66) |
+| **Command (train)** | `uv run python Run.py -mode ict_train_aggregator -model OpenCity -load_pretrain_path OpenCity-plus.pth -batch_size 2 -num_demonstrations 3 -demo_selection knn -aggregator_type attention -aggregator_epochs 5 -aggregator_lr 1e-4 -use_cpu True --embed_dim 512 --skip_dim 512 --enc_depth 6` |
+| **Command (eval)** | `uv run python Run.py -mode ict -model OpenCity -load_pretrain_path OpenCity-plus.pth -batch_size 2 -num_demonstrations 3 -demo_selection knn -ict_mode learned -aggregator_type attention -use_cpu True --embed_dim 512 --skip_dim 512 --enc_depth 6` |
+
+---
+
+## Experiment 13: [PENDING] Learned Aggregation K=3, KNN, Simple Variant (fp32)
+
+| Field | Value |
+|-------|-------|
+| **Date** | TBD |
+| **Dataset** | PEMS07M (228 nodes, 5-min interval) |
+| **Approach** | v4 — learned demo aggregation (SimpleDemoAggregator, cosine similarity) |
+| **K** | 3 |
+| **S** | 1 |
+| **Demo Selection** | KNN similarity matching |
+| **Aggregator** | `simple` (~8K params) |
+| **Aggregator Training** | 5 epochs, lr=1e-4, base model frozen |
+| **Batch Size** | 2 |
+| **Precision** | float32 |
+| **Purpose** | Compare lightweight cosine-similarity aggregator against attention variant (Exp 12) and naive averaging (Exp 10: MAE 4.66) |
+| **Command (train)** | `uv run python Run.py -mode ict_train_aggregator -model OpenCity -load_pretrain_path OpenCity-plus.pth -batch_size 2 -num_demonstrations 3 -demo_selection knn -aggregator_type simple -aggregator_epochs 5 -aggregator_lr 1e-4 -use_cpu True --embed_dim 512 --skip_dim 512 --enc_depth 6` |
+| **Command (eval)** | `uv run python Run.py -mode ict -model OpenCity -load_pretrain_path OpenCity-plus.pth -batch_size 2 -num_demonstrations 3 -demo_selection knn -ict_mode learned -aggregator_type simple -use_cpu True --embed_dim 512 --skip_dim 512 --enc_depth 6` |
