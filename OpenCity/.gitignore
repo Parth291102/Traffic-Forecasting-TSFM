@@ -1,0 +1,8 @@
+# Cache files from ICT precomputation
+model_weights/*/ict_cache/
+
+# Training logs
+model/train_log.txt
+
+# Model weight files
+model_weights/*/aggregator_best.pth

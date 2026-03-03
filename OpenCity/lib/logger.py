@@ -11,6 +11,10 @@ def get_logger(root, name=None, debug=True):
     #critical > error > warning > info > debug > notset
     logger.setLevel(logging.DEBUG)
 
+    # Avoid adding duplicate handlers if logger already configured
+    if logger.handlers:
+        return logger
+
     # define the formate
     formatter = logging.Formatter('%(asctime)s: %(message)s', "%Y-%m-%d %H:%M")
     # create another handler for output log to console

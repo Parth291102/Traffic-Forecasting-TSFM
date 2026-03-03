@@ -177,6 +177,78 @@ class Trainer(object):
         logger.info("Average Horizon, MAE: {:.2f}, RMSE: {:.2f}, MAPE: {:.4f}%, CORR:{:.4f}".format(
             mae, rmse, mape * 100, corr))
 
+    def _precompute_ict_cache(self, dataloader, cache_dir, desc='Precompute'):
+        """Pre-compute base model outputs and save per-batch .pt files to disk.
+
+        Since the base model is frozen, predictions and encoder features are
+        constant across epochs.  Computing them once and caching to disk avoids
+        redundant forward passes during aggregator training.
+
+        Each .pt file stores a dict:
+            query_pred  [B, T, N, 1]
+            query_enc   [B, N, D]
+            corrections [B, K, T, N, 1]
+            demo_encs   [B, K, N, D]
+            targets     [B, T, N, 1]
+        """
+        os.makedirs(cache_dir, exist_ok=True)
+        self.model.eval()
+        args = self.args
+        predictor = self.model.predictor
+
+        batch_idx = 0
+        max_batches = getattr(args, 'debug_batches', 0)
+        with torch.no_grad():
+            for batch_data in tqdm(dataloader, desc=desc):
+                # Resume support: skip already-cached batches
+                cache_file = os.path.join(cache_dir, f'batch_{batch_idx}.pt')
+                if os.path.exists(cache_file):
+                    batch_idx += 1
+                    if max_batches > 0 and batch_idx >= max_batches:
+                        break
+                    continue
+
+                inputs, targets, demos_x, demos_y = batch_data
+                inputs = inputs.squeeze(0).to(args.device)
+                targets = targets.squeeze(0).to(args.device)
+                demos_x = demos_x.squeeze(0).to(args.device)
+                demos_y = demos_y.squeeze(0).to(args.device)
+
+                select_dataset = get_key_from_value(self.num_nodes_dict, inputs.shape[2])
+
+                # Query
+                query_pred, query_enc = predictor._forward_with_features(
+                    inputs, targets, select_dataset)
+
+                # Demos
+                K = demos_x.shape[1]  # demos_x: [B, S, K, T, N, F] → use S=0
+                dx = demos_x[:, 0]    # [B, K, T, N, F]
+                dy = demos_y[:, 0]    # [B, K, T, N, F]
+                corrections_list = []
+                demo_encs_list = []
+                for k in range(K):
+                    dk_pred, dk_enc = predictor._forward_with_features(
+                        dx[:, k], dy[:, k], select_dataset)
+                    corrections_list.append(dy[:, k, :, :, :args.output_dim] - dk_pred)
+                    demo_encs_list.append(dk_enc)
+
+                cache = {
+                    'query_pred':  query_pred.cpu().half(),
+                    'query_enc':   query_enc.cpu().half(),
+                    'corrections': torch.stack(corrections_list, dim=1).cpu().half(),
+                    'demo_encs':   torch.stack(demo_encs_list, dim=1).cpu().half(),
+                    'targets':     targets[..., :args.output_dim].cpu().half(),
+                }
+                torch.save(cache, os.path.join(cache_dir, f'batch_{batch_idx}.pt'))
+                batch_idx += 1
+                if max_batches > 0 and batch_idx >= max_batches:
+                    break
+
+        # Count total cached batches (including previously cached)
+        total_cached = len([f for f in os.listdir(cache_dir) if f.startswith('batch_') and f.endswith('.pt')])
+        self.logger.info(f'[Cache] {cache_dir}: {total_cached} batches cached on disk')
+        return total_cached
+
     def train_aggregator(self):
         """Train only the DemoAggregator while keeping the base model frozen.
 
@@ -203,34 +275,54 @@ class Trainer(object):
                          f'params={sum(p.numel() for p in aggregator.parameters())}, '
                          f'lr={args.aggregator_lr}, epochs={args.aggregator_epochs}')
 
+        # 4. Pre-compute base model features (one-time cost)
+        cache_base = os.path.join(args.log_dir, 'ict_cache')
+        train_cache_dir = os.path.join(cache_base, 'train')
+        val_cache_dir = os.path.join(cache_base, 'val')
+
+        self.logger.info('[Aggregator] Pre-computing base model features (one-time)...')
+        n_train_batches = self._precompute_ict_cache(
+            self.train_dataloader, train_cache_dir, 'Precompute train')
+
+        n_val_batches = 0
+        if self.val_dataloader is not None:
+            n_val_batches = self._precompute_ict_cache(
+                self.val_dataloader, val_cache_dir, 'Precompute val')
+
+        self.logger.info('[Aggregator] Pre-computation done. Training on cached features...')
+
+        # 5. Train aggregator on cached features (no base model forward passes)
         best_loss = float('inf')
         best_state = None
         not_improved_count = 0
 
+        # Determine dataset name for scaler (constant for single-dataset)
+        select_dataset = args.dataset_use[0]
+
         for epoch in tqdm(range(args.aggregator_epochs)):
             # --- Train ---
-            self.model.train()
+            aggregator.train()
             total_loss = 0
             step = 0
 
-            for batch_data in self.train_dataloader:
-                inputs, targets, demos_x, demos_y = batch_data
-                inputs = inputs.squeeze(0).to(args.device)
-                targets = targets.squeeze(0).to(args.device)
-                demos_x = demos_x.squeeze(0).to(args.device)  # [B, S, K, T, N, F]
-                demos_y = demos_y.squeeze(0).to(args.device)
+            # Shuffle batch file order each epoch
+            batch_order = list(range(n_train_batches))
+            np.random.shuffle(batch_order)
 
-                select_dataset = get_key_from_value(self.num_nodes_dict, inputs.shape[2])
+            for bi in batch_order:
+                cache = torch.load(os.path.join(train_cache_dir, f'batch_{bi}.pt'),
+                                   weights_only=True)
+                query_pred = cache['query_pred'].float().to(args.device)
+                query_enc = cache['query_enc'].float().to(args.device)
+                corrections = cache['corrections'].float().to(args.device)
+                demo_encs = cache['demo_encs'].float().to(args.device)
+                tgt = cache['targets'].float().to(args.device)
 
-                # Use first demo selection (S=0) for training
-                output = self.model(inputs, targets, select_dataset,
-                                    demos_x=demos_x[:, 0],  # [B, K, T, N, F]
-                                    demos_y=demos_y[:, 0],
-                                    ict_mode='learned')
+                weighted_correction = aggregator(query_enc, demo_encs, corrections)
+                output = query_pred + weighted_correction
 
                 agg_optimizer.zero_grad()
-                loss = self.loss(output, targets[..., :args.output_dim],
-                                 self.scaler_dict[select_dataset])
+                loss = self.loss(output, tgt, self.scaler_dict[select_dataset])
                 loss.backward()
 
                 if args.grad_norm:
@@ -243,12 +335,13 @@ class Trainer(object):
                     self.logger.info(f'[Aggregator] epoch {epoch} step {step} '
                                      f'train_loss={total_loss / step:.6f}')
 
-            train_loss = total_loss / max(len(self.train_dataloader), 1)
+            train_loss = total_loss / max(n_train_batches, 1)
             self.logger.info(f'[Aggregator] Epoch {epoch}: train_loss={train_loss:.6f}')
 
             # --- Validation ---
-            if self.val_dataloader is not None:
-                val_loss = self._val_aggregator_epoch()
+            if n_val_batches > 0:
+                val_loss = self._val_aggregator_cached(val_cache_dir, n_val_batches,
+                                                       aggregator, select_dataset)
                 self.logger.info(f'[Aggregator] Epoch {epoch}: val_loss={val_loss:.6f}')
 
                 if val_loss < best_loss:
@@ -273,31 +366,31 @@ class Trainer(object):
             self.logger.info(f'[Aggregator] Best weights saved to {save_path}')
             aggregator.load_state_dict(best_state)
 
-    def _val_aggregator_epoch(self):
-        """Validation epoch for aggregator training."""
-        self.model.eval()
+        # Keep cache on disk for resume support (user can delete manually)
+        self.logger.info(f'[Cache] Cache preserved at {cache_base} for potential resume')
+
+    def _val_aggregator_cached(self, cache_dir, n_batches, aggregator, select_dataset):
+        """Validation using pre-computed cached features."""
+        aggregator.eval()
         total_val_loss = 0
         with torch.no_grad():
-            for batch_data in self.val_dataloader:
-                inputs, targets, demos_x, demos_y = batch_data
-                inputs = inputs.squeeze(0).to(self.args.device)
-                targets = targets.squeeze(0).to(self.args.device)
-                demos_x = demos_x.squeeze(0).to(self.args.device)
-                demos_y = demos_y.squeeze(0).to(self.args.device)
+            for bi in range(n_batches):
+                cache = torch.load(os.path.join(cache_dir, f'batch_{bi}.pt'),
+                                   weights_only=True)
+                query_pred = cache['query_pred'].float().to(self.args.device)
+                query_enc = cache['query_enc'].float().to(self.args.device)
+                corrections = cache['corrections'].float().to(self.args.device)
+                demo_encs = cache['demo_encs'].float().to(self.args.device)
+                tgt = cache['targets'].float().to(self.args.device)
 
-                select_dataset = get_key_from_value(self.num_nodes_dict, inputs.shape[2])
+                weighted_correction = aggregator(query_enc, demo_encs, corrections)
+                output = query_pred + weighted_correction
 
-                output = self.model(inputs, targets, select_dataset,
-                                    demos_x=demos_x[:, 0],
-                                    demos_y=demos_y[:, 0],
-                                    ict_mode='learned')
-
-                loss = self.loss(output, targets[..., :self.args.output_dim],
-                                 self.scaler_dict[select_dataset])
+                loss = self.loss(output, tgt, self.scaler_dict[select_dataset])
                 if not torch.isnan(loss):
                     total_val_loss += loss.item()
 
-        return total_val_loss / max(len(self.val_dataloader), 1)
+        return total_val_loss / max(n_batches, 1)
 
     @staticmethod
     def test_ict(model, args, scaler_dict, test_dataloader, logger, path=None,

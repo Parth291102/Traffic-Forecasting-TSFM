@@ -33,6 +33,8 @@ if args.use_cpu:
     print('Forced CPU mode via -use_cpu flag')
 args.num_nodes_dict = num_nodes_dict
 args_predictor = get_predictor_params(args)
+# Save CLI-parsed values before predictor config override
+_cli_args = {k: v for k, v in vars(args).items()}
 attr_list = []
 if args.mode !='pretrain':
     for arg in vars(args):
@@ -40,6 +42,11 @@ if args.mode !='pretrain':
     for attr in attr_list:
         if hasattr(args, attr) and hasattr(args_predictor, attr):
             setattr(args, attr, getattr(args_predictor, attr))
+    # Re-apply explicitly-set CLI flags (CLI should override config defaults)
+    for attr in attr_list:
+        cli_flag = f'-{attr}'
+        if cli_flag in sys.argv and attr in _cli_args:
+            setattr(args, attr, _cli_args[attr])
     for arg in vars(args):
         print(arg, ':', getattr(args, arg))
     print('==========')

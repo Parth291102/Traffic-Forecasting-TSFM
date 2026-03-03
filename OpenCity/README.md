@@ -49,6 +49,7 @@ Experimental results demonstrate that OpenCity exhibits exceptional zero-shot pr
 │   ├── ASTGCN/
 │   │   └── ASTGCN.conf
 │   ├── general_conf/
+│   │   ├── dataset_splits.conf
 │   │   ├── global_baselines.conf
 │   │   └── pretrain.conf
 │   ├── GWN/
@@ -74,6 +75,7 @@ Experimental results demonstrate that OpenCity exhibits exceptional zero-shot pr
 │   └── README.md
 ├── lib/
 │   ├── data_process.py
+│   ├── ict_data_process.py
 │   ├── logger.py
 │   ├── metrics.py
 │   ├── Params_predictor.py
@@ -101,6 +103,7 @@ Experimental results demonstrate that OpenCity exhibits exceptional zero-shot pr
 │   │   └── MTGNN.py
 │   ├── OpenCity/
 │   │   ├── args.py
+│   │   ├── DemoAggregator.py
 │   │   └── OpenCity.py
 │   ├── PDFormer/
 │   │   ├── args.py
@@ -418,13 +421,13 @@ ICT supports two modes controlled by `-ict_mode`:
 - **`residual`** (default): naive average of demo corrections — no training, no weight updates.
 - **`learned`**: uses a trained `DemoAggregator` module to weight demo corrections via cross-attention. Requires running `ict_train_aggregator` first to train the aggregator.
 
-ICT parameters (controlled via `conf/ICT/ICT.conf` or CLI flags):
+ICT parameters (CLI flags in `lib/Params_pretrain.py`):
 
 | Parameter | Default | Description |
 |-----------|---------|-------------|
 | `-num_demonstrations` | `1` | Number of demonstration pairs (K) prepended to each query |
 | `-num_prefix_selections` | `1` | Number of prefix candidates sampled per query |
-| `-demo_selection` | `random` | Strategy for selecting demonstrations (`random`) |
+| `-demo_selection` | `random` | Strategy for selecting demonstrations: `random`, `recent`, or `similar` (KNN-based) |
 | `-ict_mode` | `residual` | ICT correction mode: `residual` (naive average) or `learned` (trained aggregator) |
 | `-aggregator_type` | `attention` | Aggregator architecture: `simple` (cosine similarity, ~8K params) or `attention` (cross-attention, ~30K-200K params) |
 
@@ -483,16 +486,18 @@ cd /path/to/OpenCity/model
 
 # Step 1: Train the aggregator (base model frozen, CPU-friendly)
 uv run python Run.py -mode ict_train_aggregator -model OpenCity \
-  -load_pretrain_path OpenCity-plus.pth -batch_size 2 \
-  -num_demonstrations 3 -demo_selection knn \
+  -load_pretrain_path OpenCity-plus.pth -batch_size 64 \
+  -num_demonstrations 3 -demo_selection similar \
   -aggregator_type attention -aggregator_epochs 5 -aggregator_lr 1e-4 \
+  -early_stop True -early_stop_patience 3 \
   -use_cpu True \
+  -log_step 2 \
   --embed_dim 512 --skip_dim 512 --enc_depth 6
 
 # Step 2: Evaluate with learned aggregation
 uv run python Run.py -mode ict -model OpenCity \
   -load_pretrain_path OpenCity-plus.pth -batch_size 2 \
-  -num_demonstrations 3 -demo_selection knn \
+  -num_demonstrations 3 -demo_selection similar \
   -ict_mode learned -aggregator_type attention \
   -use_cpu True \
   --embed_dim 512 --skip_dim 512 --enc_depth 6
@@ -500,7 +505,7 @@ uv run python Run.py -mode ict -model OpenCity \
 # Compare against baseline (naive averaging)
 uv run python Run.py -mode ict -model OpenCity \
   -load_pretrain_path OpenCity-plus.pth -batch_size 2 \
-  -num_demonstrations 3 -demo_selection knn \
+  -num_demonstrations 3 -demo_selection similar \
   -ict_mode residual \
   -use_cpu True \
   --embed_dim 512 --skip_dim 512 --enc_depth 6

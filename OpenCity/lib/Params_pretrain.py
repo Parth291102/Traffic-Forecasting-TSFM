@@ -70,6 +70,7 @@ def parse_args(device):
     args.add_argument('-num_prefix_selections', default=1, type=int,
                       help='Number of independent demo sets (S) to average at test time')
     args.add_argument('-demo_selection', default='random', type=str,
+                      choices=['random', 'recent', 'similar'],
                       help='Demo selection strategy: random, recent, similar')
     # ICT learned aggregation parameters
     args.add_argument('-ict_mode', default='residual', type=str,
@@ -82,5 +83,7 @@ def parse_args(device):
                       help='Epochs to train demo aggregator')
     args.add_argument('-aggregator_lr', default=1e-4, type=float,
                       help='Learning rate for aggregator training')
+    args.add_argument('-debug_batches', default=0, type=int,
+                      help='Limit batches per phase for smoke testing (0=unlimited)')
     args, _ = args.parse_known_args()
     return args
