@@ -75,31 +75,38 @@ Learnable parameters:
   - Total: ~2*D^2 + 2 ≈ 8194 params (D=64)
 ```
 
-### Variant B: DemoAggregator (~200K params) — Stronger Expressiveness
+### Variant B: DemoAggregator (~198K params) — Multi-head Cross-Attention
 
-**Principle**: multi-head cross-attention + gating
+**Principle**: standard multi-head Q·K cross-attention + per-node softplus scale
+
+**Key design choices:**
+- Multi-head Q·K attention (H=4 heads, hd=32): each head learns a different demo-weighting strategy
+- Corrections used directly as "values" — no V-projection, no correction_encoder, no mean-pool over T
+- H candidate corrections combined via learned Linear(H→1) (init to 1/H = head-average)
+- Per-node softplus scale replaces sigmoid gate — can amplify corrections, always ≥ 0
+- Zero-init on scale_net → softplus(0) ≈ 0.693 for gentle start
+- No FFN (V1's 1M-param FFN was overkill for a scalar gate)
 
 ```
 Inputs: same as Variant A
 
 Computation:
-  1. Q = Linear(query_feat)                      [B, N, H, hd]
-  2. K = Linear(demo_feats)                      [B, K, N, H, hd]
-  3. attn = softmax(Q·K^T / sqrt(hd))            [B, N, H, K]   ← attention weights
-  4. corr_encoded = MLP(corrections)             [B, K, N, D]   ← encode scalar corrections
-  5. V = Linear(corr_encoded)                     [B, K, N, H, hd]
-  6. out = sum_k(attn_k * V_k)                   [B, N, D]
-  7. out = LayerNorm(out) + FFN(out)              [B, N, D]
-  8. gate = sigmoid(Linear(out))                  [B, N, 1]     ← learn correction magnitude
-  9. weighted_corr = gate * sum_k(attn_avg_k * corr_k)  [B, T, N, 1]
+  1. Q = Linear(LayerNorm(query_feat))             [B, N, H, hd]  ← D → H*hd
+  2. K = Linear(LayerNorm(demo_feats))             [B, K, N, H, hd]
+  3. attn = softmax(Q·K^T / sqrt(hd), dim=K)      [B, N, H, K]   ← per-head demo weights
+  4. per-head weighted corr:                        [B, T, N, H]   ← H candidate corrections
+     weighted_h = sum_k(attn[h,k] * corrections_k)
+  5. out = Linear(weighted, H→1)                   [B, T, N, 1]   ← combine heads
+  6. scale = softplus(MLP(query_feat))              [B, N, 1]      ← per-node scale (≥0)
+  7. output = out * scale                           [B, T, N, 1]
 
-Learnable parameters:
-  - Q/K/V projections: 3 * D^2 ≈ 12K
-  - correction_encoder: D/4 + D*D/4 ≈ 1K
-  - FFN: 2 * D * 2D ≈ 16K
-  - LayerNorm: 4D
-  - out_proj: D
-  - Total: ~30K-200K params (depending on D)
+Learnable parameters (D=512, H=4, proj_dim=128, hd=32):
+  - LayerNorm:        2 * D = 1,024
+  - Q proj (D→128):   D * 128 + 128 = 65,664
+  - K proj (D→128):   D * 128 + 128 = 65,664
+  - head_combine (4→1, no bias): 4              (init to 1/H)
+  - scale_net:        D * 128 + 128 + 128 + 1 = 65,793  (zero-init last layer)
+  - Total: ~198K params
 ```
 
 ## 4. Implementation Steps
@@ -108,7 +115,7 @@ Learnable parameters:
 
 Two classes sharing the same interface:
 - `SimpleDemoAggregator(embed_dim)` — cosine similarity variant
-- `DemoAggregator(embed_dim, num_heads=4, hidden_dim=None, dropout=0.1)` — cross-attention variant
+- `DemoAggregator(embed_dim, num_heads=4, proj_dim=None, dropout=0.1)` — multi-head cross-attention variant
 
 Both implement: `forward(query_feat, demo_feats, corrections) → [B, T, N, 1]`
 
@@ -322,7 +329,7 @@ When `args.ict_mode == 'learned'`:
 |------|-------|
 | Base model params | ~millions (all frozen, no gradients) |
 | Aggregator params (simple) | ~8K (all trained) |
-| Aggregator params (attention) | ~200K (all trained) |
+| Aggregator params (attention) | ~198K (all trained) |
 | Forward passes | K+1 (same as current) |
 | Backward pass | Only through aggregator (~8K-200K params) |
 | Expected training epochs | 5-10 |

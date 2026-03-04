@@ -61,42 +61,53 @@ class SimpleDemoAggregator(nn.Module):
 
 
 class DemoAggregator(nn.Module):
-    """Cross-attention aggregator for demo corrections.
+    """Multi-head cross-attention aggregator for demo corrections.
 
-    Uses multi-head attention where the query representation attends to
-    demo representations, and the attended output modulates corrections.
+    Follows standard cross-attention: Q from query, K from demos, attention
+    weights applied to corrections (the "values"). Multi-head lets different
+    heads learn different demo-weighting strategies; a learned linear
+    combination merges H candidate corrections into one.
+
+    Pipeline:
+        1. LayerNorm → Q/K projections (D → H * hd)
+        2. Multi-head dot-product attention → [B, N, H, K]
+        3. Per-head weighted corrections → [B, T, N, H]
+        4. Head combination: Linear(H → 1)  → [B, T, N, 1]
+        5. Per-node softplus scale          → [B, T, N, 1]
+
+    ~198K params (D=512, H=4, proj_dim=128, hd=32)
     """
 
-    def __init__(self, embed_dim, num_heads=4, hidden_dim=None, dropout=0.1):
+    def __init__(self, embed_dim, num_heads=4, proj_dim=None, dropout=0.1):
         super().__init__()
         self.embed_dim = embed_dim
         self.num_heads = num_heads
-        self.head_dim = embed_dim // num_heads
-        self.hidden_dim = hidden_dim or 2 * embed_dim
-        self.scale = self.head_dim ** -0.5
+        self.proj_dim = proj_dim or embed_dim // 4
+        self.head_dim = self.proj_dim // num_heads
+        assert self.proj_dim % num_heads == 0, \
+            f'proj_dim ({self.proj_dim}) must be divisible by num_heads ({num_heads})'
+        self.attn_scale = self.head_dim ** -0.5
 
-        # Attention projections
-        self.q_proj = nn.Linear(embed_dim, embed_dim)
-        self.k_proj = nn.Linear(embed_dim, embed_dim)
+        # 1. Pre-norm + Q/K projections (D → proj_dim, split into H heads)
+        self.norm = nn.LayerNorm(embed_dim)
+        self.q_proj = nn.Linear(embed_dim, self.proj_dim)
+        self.k_proj = nn.Linear(embed_dim, self.proj_dim)
 
-        # Encode scalar corrections to embed_dim for values
-        self.correction_encoder = nn.Sequential(
-            nn.Linear(1, embed_dim // 4),
-            nn.ReLU(),
-            nn.Linear(embed_dim // 4, embed_dim),
-        )
-        self.v_proj = nn.Linear(embed_dim, embed_dim)
+        # 2. Head combination: merge H candidate corrections → 1
+        #    Init to 1/H so output starts as head-average (≈ single-head baseline)
+        self.head_combine = nn.Linear(num_heads, 1, bias=False)
+        nn.init.constant_(self.head_combine.weight, 1.0 / num_heads)
 
-        # Output layers
-        self.out_proj = nn.Linear(embed_dim, 1)
-        self.norm1 = nn.LayerNorm(embed_dim)
-        self.ffn = nn.Sequential(
-            nn.Linear(embed_dim, self.hidden_dim),
+        # 3. Per-node scale: softplus(MLP(query_feat)) — can amplify, always ≥ 0
+        #    Zero-init last layer: softplus(0) ≈ 0.693 → gentle start
+        self.scale_net = nn.Sequential(
+            nn.Linear(embed_dim, self.proj_dim),
             nn.SiLU(),
-            nn.Dropout(dropout),
-            nn.Linear(self.hidden_dim, embed_dim),
+            nn.Linear(self.proj_dim, 1),
         )
-        self.norm2 = nn.LayerNorm(embed_dim)
+        nn.init.zeros_(self.scale_net[-1].weight)
+        nn.init.zeros_(self.scale_net[-1].bias)
+
         self.dropout = nn.Dropout(dropout)
 
     def forward(self, query_feat, demo_feats, corrections):
@@ -110,53 +121,33 @@ class DemoAggregator(nn.Module):
             aggregated_correction: [B, T, N, 1]
         """
         B, K, T, N, _ = corrections.shape
-        D = self.embed_dim
         H = self.num_heads
         hd = self.head_dim
 
-        # --- Per-node cross-attention: query attends to K demos ---
-        # Q from query: [B, N, D] → [B, N, H, hd]
-        Q = self.q_proj(query_feat).view(B, N, H, hd)      # [B, N, H, hd]
+        # ---- 1. Multi-head Q·K attention ----
+        q = self.q_proj(self.norm(query_feat))            # [B, N, proj_dim]
+        k = self.k_proj(self.norm(demo_feats))            # [B, K, N, proj_dim]
 
-        # K from demos: [B, K, N, D] → [B, K, N, H, hd]
-        K_attn = self.k_proj(demo_feats).view(B, K, N, H, hd)
+        q = q.view(B, N, H, hd)                           # [B, N, H, hd]
+        k = k.view(B, K, N, H, hd)                        # [B, K, N, H, hd]
 
-        # Attention scores: [B, N, H, 1, hd] @ [B, N, H, hd, K] → [B, N, H, 1, K]
-        Q_exp = Q.permute(0, 1, 2, 3).unsqueeze(3)          # [B, N, H, 1, hd]
-        K_exp = K_attn.permute(0, 2, 3, 4, 1)               # [B, N, H, hd, K]
-        attn = torch.matmul(Q_exp, K_exp).squeeze(3)         # [B, N, H, K]
-        attn = attn * self.scale
-        attn = F.softmax(attn, dim=-1)                       # [B, N, H, K]
+        # Per-node, per-head attention over K demos
+        attn = torch.einsum('bnhd,bknhd->bnhk', q, k)    # [B, N, H, K]
+        attn = attn * self.attn_scale
+        attn = F.softmax(attn, dim=-1)                     # [B, N, H, K]
         attn = self.dropout(attn)
 
-        # Encode corrections for values: [B, K, T, N, 1] → [B, K, T, N, D]
-        corr_encoded = self.correction_encoder(corrections)
-        # Mean over T to get per-demo-per-node value: [B, K, N, D]
-        corr_mean = corr_encoded.mean(dim=2)
-        V = self.v_proj(corr_mean).view(B, K, N, H, hd)
+        # ---- 2. Per-head weighted corrections ----
+        # attn: [B, N, H, K] → [B, K, 1, N, H]  (for broadcasting)
+        w = attn.permute(0, 3, 1, 2).unsqueeze(2)         # [B, K, 1, N, H]
+        # corrections: [B, K, T, N, 1] broadcasts with w → [B, K, T, N, H]
+        weighted = (w * corrections).sum(dim=1)            # [B, T, N, H]
 
-        # Weighted sum: [B, N, H, K] @ [B, N, H, K, hd] → [B, N, H, hd]
-        V_exp = V.permute(0, 2, 3, 4, 1)                    # [B, N, H, hd, K]
-        V_for_attn = V.permute(0, 2, 3, 1, 4)               # [B, N, H, K, hd]
-        out = torch.matmul(attn.unsqueeze(3), V_for_attn)    # [B, N, H, 1, hd]
-        out = out.squeeze(3)                                  # [B, N, H, hd]
-        out = out.reshape(B, N, D)                            # [B, N, D]
+        # ---- 3. Combine heads → single correction ----
+        out = self.head_combine(weighted)                  # [B, T, N, 1]
 
-        # Norm + FFN
-        out = self.norm1(out)
-        out = self.norm2(out + self.ffn(out))
+        # ---- 4. Per-node scale (softplus, can amplify) ----
+        scale = F.softplus(self.scale_net(query_feat))     # [B, N, 1]
+        out = out * scale.unsqueeze(1)                     # [B, T, N, 1]
 
-        # Project to scalar correction weight per node: [B, N, 1]
-        gate = torch.sigmoid(self.out_proj(out))              # [B, N, 1]
-
-        # Apply gate to the attention-weighted correction mean
-        # Also reuse the attention weights to weight the actual corrections
-        # attn: [B, N, H, K] → average over heads → [B, N, K]
-        attn_avg = attn.mean(dim=2)                           # [B, N, K]
-
-        # Weight corrections: [B, N, K] → [B, K, N] → [B, K, 1, N, 1]
-        w = attn_avg.permute(0, 2, 1).unsqueeze(2).unsqueeze(-1)  # [B, K, 1, N, 1]
-        weighted = (w * corrections).sum(dim=1)               # [B, T, N, 1]
-
-        # Apply learned gate
-        return weighted * gate.unsqueeze(1)                   # [B, T, N, 1]
+        return out

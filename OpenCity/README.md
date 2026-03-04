@@ -474,6 +474,7 @@ Aggregator training parameters:
 | `-aggregator_type` | `attention` | `simple` (cosine similarity, ~8K params) or `attention` (cross-attention + gating, ~30K-200K params) |
 | `-aggregator_epochs` | `5` | Number of training epochs for the aggregator |
 | `-aggregator_lr` | `1e-4` | Learning rate for aggregator training |
+| `-debug_batches` | `0` | Limit batches per phase for smoke testing (0=unlimited) |
 
 ```bash
 # First, edit conf/general_conf/pretrain.conf:
@@ -485,13 +486,24 @@ Aggregator training parameters:
 cd /path/to/OpenCity/model
 
 # Step 1: Train the aggregator (base model frozen, CPU-friendly)
+#   Training uses online forward passes (no disk caching).
+#   Checkpoint is saved after every batch to aggregator_ckpt.pth.
+#   If interrupted, re-run the same command to resume from last checkpoint.
 uv run python Run.py -mode ict_train_aggregator -model OpenCity \
   -load_pretrain_path OpenCity-plus.pth -batch_size 64 \
   -num_demonstrations 3 -demo_selection similar \
   -aggregator_type attention -aggregator_epochs 5 -aggregator_lr 1e-4 \
   -early_stop True -early_stop_patience 3 \
   -use_cpu True \
-  -log_step 2 \
+  -log_step 1 \
+  --embed_dim 512 --skip_dim 512 --enc_depth 6
+
+# Smoke test (1 batch only, for pipeline validation):
+uv run python Run.py -mode ict_train_aggregator -model OpenCity \
+  -load_pretrain_path OpenCity-plus.pth -batch_size 4 \
+  -num_demonstrations 3 -demo_selection similar \
+  -aggregator_type attention -aggregator_epochs 2 -aggregator_lr 1e-4 \
+  -debug_batches 1 -use_cpu True -log_step 1 \
   --embed_dim 512 --skip_dim 512 --enc_depth 6
 
 # Step 2: Evaluate with learned aggregation
@@ -499,7 +511,6 @@ uv run python Run.py -mode ict -model OpenCity \
   -load_pretrain_path OpenCity-plus.pth -batch_size 2 \
   -num_demonstrations 3 -demo_selection similar \
   -ict_mode learned -aggregator_type attention \
-  -use_cpu True \
   --embed_dim 512 --skip_dim 512 --enc_depth 6
 
 # Compare against baseline (naive averaging)
@@ -511,11 +522,13 @@ uv run python Run.py -mode ict -model OpenCity \
   --embed_dim 512 --skip_dim 512 --enc_depth 6
 ```
 
-> **What `ict_train_aggregator` does**: Loads pretrained weights → freezes all base model parameters → initializes a `DemoAggregator` → trains aggregator on ICT training data with validation + early stopping → saves `aggregator_best.pth` → runs `test_ict` with `ict_mode='learned'`.
+> **What `ict_train_aggregator` does**: Loads pretrained weights → freezes all base model parameters → initializes a `DemoAggregator` → trains aggregator online (each batch: base model forward passes + aggregator gradient step) → saves checkpoint after every batch (`aggregator_ckpt.pth`) for resume support → runs validation at end of each epoch with early stopping → saves `aggregator_best.pth` → runs `test_ict` with `ict_mode='learned'`.
+>
+> **Resume support**: If training is interrupted (e.g., server shutdown), re-run the exact same command. The trainer auto-detects `aggregator_ckpt.pth` and resumes from the last completed batch, preserving optimizer state, epoch position, and best validation loss.
 
 The `DemoAggregator` module is defined in `model/OpenCity/DemoAggregator.py` and provides two variants:
 - **`SimpleDemoAggregator`**: cosine similarity between projected query and demo encoder features → per-node softmax weights → weighted correction sum. ~8K params.
-- **`DemoAggregator`**: multi-head cross-attention (query attends to demo features) → correction encoder → LayerNorm + FFN → sigmoid gate → attention-weighted corrections. ~30K-200K params depending on `embed_dim`.
+- **`DemoAggregator`**: multi-head cross-attention (Q·K over demo features, H=4 heads) → per-head weighted corrections → head combination → per-node softplus scale. ~198K params (D=512).
 
 #### Summary of Modes
 

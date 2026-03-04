@@ -249,17 +249,78 @@ class Trainer(object):
         self.logger.info(f'[Cache] {cache_dir}: {total_cached} batches cached on disk')
         return total_cached
 
-    def train_aggregator(self):
-        """Train only the DemoAggregator while keeping the base model frozen.
+    def _precompute_inmemory(self, dataloader, desc='Precompute'):
+        """Pre-compute base model outputs and store in CPU memory (half precision).
 
-        Uses ICT dataloaders (4-tuple: inputs, targets, demos_x, demos_y).
-        Only aggregator parameters receive gradients.
+        Avoids disk I/O entirely.  Returns a list of dicts, one per batch:
+            query_pred  [B, T, N, 1]   (cpu, float16)
+            query_enc   [B, N, D]      (cpu, float16)
+            corrections [B, K, T, N, 1](cpu, float16)
+            demo_encs   [B, K, N, D]   (cpu, float16)
+            targets     [B, T, N, 1]   (cpu, float16)
         """
+        self.model.eval()
+        args = self.args
+        predictor = self.model.predictor
+        max_batches = getattr(args, 'debug_batches', 0)
+
+        cache_list = []
+        with torch.no_grad():
+            for batch_idx, batch_data in enumerate(tqdm(dataloader, desc=desc)):
+                if max_batches > 0 and batch_idx >= max_batches:
+                    break
+
+                inputs, targets, demos_x, demos_y = batch_data
+                inputs = inputs.squeeze(0).to(args.device)
+                targets = targets.squeeze(0).to(args.device)
+                demos_x = demos_x.squeeze(0).to(args.device)
+                demos_y = demos_y.squeeze(0).to(args.device)
+
+                select_dataset = get_key_from_value(self.num_nodes_dict, inputs.shape[2])
+
+                # Query
+                query_pred, query_enc = predictor._forward_with_features(
+                    inputs, targets, select_dataset)
+
+                # Demos
+                K = demos_x.shape[1]
+                dx = demos_x[:, 0]
+                dy = demos_y[:, 0]
+                corrections_list = []
+                demo_encs_list = []
+                for k in range(K):
+                    dk_pred, dk_enc = predictor._forward_with_features(
+                        dx[:, k], dy[:, k], select_dataset)
+                    corrections_list.append(dy[:, k, :, :, :args.output_dim] - dk_pred)
+                    demo_encs_list.append(dk_enc)
+
+                cache_list.append({
+                    'query_pred':  query_pred.cpu().half(),
+                    'query_enc':   query_enc.cpu().half(),
+                    'corrections': torch.stack(corrections_list, dim=1).cpu().half(),
+                    'demo_encs':   torch.stack(demo_encs_list, dim=1).cpu().half(),
+                    'targets':     targets[..., :args.output_dim].cpu().half(),
+                })
+
+        self.logger.info(f'[InMemCache] {desc}: {len(cache_list)} batches cached in RAM')
+        return cache_list
+
+    def train_aggregator(self):
+        """Train DemoAggregator with in-memory caching.
+
+        Phase 1: Run frozen base model once over train & val sets, cache all
+                 intermediate outputs (query_pred, query_enc, corrections,
+                 demo_encs, targets) in CPU RAM as float16.
+        Phase 2: Train aggregator for multiple epochs reading from RAM only.
+                 ~10-20x faster than re-running base model every batch.
+        """
+        import random as _random
         args = self.args
 
         # 1. Freeze all base model parameters
         for param in self.model.parameters():
             param.requires_grad = False
+        self.model.eval()
 
         # 2. Initialize aggregator
         predictor = self.model.predictor
@@ -275,49 +336,55 @@ class Trainer(object):
                          f'params={sum(p.numel() for p in aggregator.parameters())}, '
                          f'lr={args.aggregator_lr}, epochs={args.aggregator_epochs}')
 
-        # 4. Pre-compute base model features (one-time cost)
-        cache_base = os.path.join(args.log_dir, 'ict_cache')
-        train_cache_dir = os.path.join(cache_base, 'train')
-        val_cache_dir = os.path.join(cache_base, 'val')
-
-        self.logger.info('[Aggregator] Pre-computing base model features (one-time)...')
-        n_train_batches = self._precompute_ict_cache(
-            self.train_dataloader, train_cache_dir, 'Precompute train')
-
-        n_val_batches = 0
-        if self.val_dataloader is not None:
-            n_val_batches = self._precompute_ict_cache(
-                self.val_dataloader, val_cache_dir, 'Precompute val')
-
-        self.logger.info('[Aggregator] Pre-computation done. Training on cached features...')
-
-        # 5. Train aggregator on cached features (no base model forward passes)
+        # 4. Resume from checkpoint if available
+        ckpt_path = os.path.join(args.log_dir, 'aggregator_ckpt.pth')
+        start_epoch = 0
         best_loss = float('inf')
         best_state = None
         not_improved_count = 0
 
-        # Determine dataset name for scaler (constant for single-dataset)
+        if os.path.exists(ckpt_path):
+            ckpt = torch.load(ckpt_path, map_location=args.device, weights_only=False)
+            aggregator.load_state_dict(ckpt['aggregator_state_dict'])
+            agg_optimizer.load_state_dict(ckpt['optimizer_state_dict'])
+            start_epoch = ckpt['epoch']
+            best_loss = ckpt.get('best_loss', float('inf'))
+            not_improved_count = ckpt.get('not_improved_count', 0)
+            if ckpt.get('best_state') is not None:
+                best_state = ckpt['best_state']
+            self.logger.info(f'[Aggregator] Resumed from checkpoint: epoch {start_epoch}, '
+                             f'best_val_loss={best_loss:.6f}')
+
+        # Determine dataset name for scaler
         select_dataset = args.dataset_use[0]
 
-        for epoch in tqdm(range(args.aggregator_epochs)):
-            # --- Train ---
+        # 5. Pre-compute base model outputs into CPU RAM (one-time cost)
+        self.logger.info('[Aggregator] Phase 1: pre-computing base model outputs into RAM ...')
+        train_cache = self._precompute_inmemory(self.train_dataloader, desc='Train cache')
+        val_cache = None
+        if self.val_dataloader is not None:
+            val_cache = self._precompute_inmemory(self.val_dataloader, desc='Val cache')
+        self.logger.info('[Aggregator] Phase 1 complete. Starting Phase 2 (aggregator training) ...')
+
+        # 6. Training loop from cached data
+        for epoch in range(start_epoch, args.aggregator_epochs):
             aggregator.train()
             total_loss = 0
             step = 0
 
-            # Shuffle batch file order each epoch
-            batch_order = list(range(n_train_batches))
-            np.random.shuffle(batch_order)
+            # Shuffle batch order each epoch for better training
+            indices = list(range(len(train_cache)))
+            _random.shuffle(indices)
 
-            for bi in batch_order:
-                cache = torch.load(os.path.join(train_cache_dir, f'batch_{bi}.pt'),
-                                   weights_only=True)
-                query_pred = cache['query_pred'].float().to(args.device)
-                query_enc = cache['query_enc'].float().to(args.device)
-                corrections = cache['corrections'].float().to(args.device)
-                demo_encs = cache['demo_encs'].float().to(args.device)
-                tgt = cache['targets'].float().to(args.device)
+            for i, cache_idx in enumerate(indices):
+                cached = train_cache[cache_idx]
+                query_pred  = cached['query_pred'].float().to(args.device)
+                query_enc   = cached['query_enc'].float().to(args.device)
+                corrections = cached['corrections'].float().to(args.device)
+                demo_encs   = cached['demo_encs'].float().to(args.device)
+                tgt         = cached['targets'].float().to(args.device)
 
+                # --- Aggregator forward + backward ---
                 weighted_correction = aggregator(query_enc, demo_encs, corrections)
                 output = query_pred + weighted_correction
 
@@ -332,16 +399,15 @@ class Trainer(object):
                 total_loss += loss.item()
                 step += 1
                 if step % args.log_step == 0:
-                    self.logger.info(f'[Aggregator] epoch {epoch} step {step} '
+                    self.logger.info(f'[Aggregator] epoch {epoch} batch {i} '
                                      f'train_loss={total_loss / step:.6f}')
 
-            train_loss = total_loss / max(n_train_batches, 1)
+            train_loss = total_loss / max(step, 1)
             self.logger.info(f'[Aggregator] Epoch {epoch}: train_loss={train_loss:.6f}')
 
-            # --- Validation ---
-            if n_val_batches > 0:
-                val_loss = self._val_aggregator_cached(val_cache_dir, n_val_batches,
-                                                       aggregator, select_dataset)
+            # --- Validation from cache ---
+            if val_cache is not None:
+                val_loss = self._val_aggregator_cached(aggregator, val_cache, select_dataset)
                 self.logger.info(f'[Aggregator] Epoch {epoch}: val_loss={val_loss:.6f}')
 
                 if val_loss < best_loss:
@@ -356,8 +422,18 @@ class Trainer(object):
                     self.logger.info(f'[Aggregator] Early stopping after {epoch + 1} epochs')
                     break
             else:
-                # No validation: always save latest
                 best_state = copy.deepcopy(aggregator.state_dict())
+
+            # Save checkpoint at end of each epoch
+            torch.save({
+                'aggregator_state_dict': aggregator.state_dict(),
+                'optimizer_state_dict': agg_optimizer.state_dict(),
+                'epoch': epoch + 1,
+                'batch_idx': 0,
+                'best_loss': best_loss,
+                'best_state': best_state,
+                'not_improved_count': not_improved_count,
+            }, ckpt_path)
 
         # Save best aggregator weights
         if best_state is not None:
@@ -366,22 +442,20 @@ class Trainer(object):
             self.logger.info(f'[Aggregator] Best weights saved to {save_path}')
             aggregator.load_state_dict(best_state)
 
-        # Keep cache on disk for resume support (user can delete manually)
-        self.logger.info(f'[Cache] Cache preserved at {cache_base} for potential resume')
-
-    def _val_aggregator_cached(self, cache_dir, n_batches, aggregator, select_dataset):
-        """Validation using pre-computed cached features."""
+    def _val_aggregator_cached(self, aggregator, val_cache, select_dataset):
+        """Validation using pre-cached base model outputs from RAM."""
         aggregator.eval()
+        args = self.args
         total_val_loss = 0
+        n_batches = 0
+
         with torch.no_grad():
-            for bi in range(n_batches):
-                cache = torch.load(os.path.join(cache_dir, f'batch_{bi}.pt'),
-                                   weights_only=True)
-                query_pred = cache['query_pred'].float().to(self.args.device)
-                query_enc = cache['query_enc'].float().to(self.args.device)
-                corrections = cache['corrections'].float().to(self.args.device)
-                demo_encs = cache['demo_encs'].float().to(self.args.device)
-                tgt = cache['targets'].float().to(self.args.device)
+            for cached in val_cache:
+                query_pred  = cached['query_pred'].float().to(args.device)
+                query_enc   = cached['query_enc'].float().to(args.device)
+                corrections = cached['corrections'].float().to(args.device)
+                demo_encs   = cached['demo_encs'].float().to(args.device)
+                tgt         = cached['targets'].float().to(args.device)
 
                 weighted_correction = aggregator(query_enc, demo_encs, corrections)
                 output = query_pred + weighted_correction
@@ -389,6 +463,7 @@ class Trainer(object):
                 loss = self.loss(output, tgt, self.scaler_dict[select_dataset])
                 if not torch.isnan(loss):
                     total_val_loss += loss.item()
+                n_batches += 1
 
         return total_val_loss / max(n_batches, 1)
 
@@ -415,18 +490,15 @@ class Trainer(object):
         for param in model.parameters():
             param.requires_grad = False
 
-        # Determine autocast dtype for memory optimization
-        # Use bfloat16: same dynamic range as float32, avoids NaN overflow
-        use_amp = torch.cuda.is_available() and str(args.device) != 'cpu'
-        amp_dtype = torch.bfloat16
-
         with torch.no_grad():
             mae = 0
             rmse = 0
             mape = 0
             total_count = 0
             total_mape_count = 0
-            total_batch = 0
+            total_samples = 0
+            batch_idx = 0
+            num_batches = len(test_dataloader)
 
             for batch_data in test_dataloader:
                 inputs, targets, demos_x, demos_y = batch_data
@@ -435,25 +507,17 @@ class Trainer(object):
                 demos_x = demos_x.squeeze(0).to(args.device)    # [B, S, K, T, N, F]
                 demos_y = demos_y.squeeze(0).to(args.device)    # [B, S, K, T, N, F]
 
-                # Convert inputs to model's dtype (float16 if model.half() was called)
-                model_dtype = next(model.parameters()).dtype
-                inputs_m = inputs.to(model_dtype)
-                targets_m = targets.to(model_dtype)
-                demos_x_m = demos_x.to(model_dtype)
-                demos_y_m = demos_y.to(model_dtype)
-
                 select_dataset = get_key_from_value(args.num_nodes_dict, inputs.shape[2])
-                S = demos_x_m.shape[1]
+                S = demos_x.shape[1]
 
                 # Average predictions over S independent demo selections
                 outputs = []
                 for s in range(S):
-                    with torch.autocast(device_type='cuda' if use_amp else 'cpu', dtype=amp_dtype, enabled=use_amp):
-                        output_s = model(inputs_m, targets_m, select_dataset,
-                                         demos_x=demos_x_m[:, s],    # [B, K, T, N, F]
-                                         demos_y=demos_y_m[:, s],     # [B, K, T, N, F]
-                                         ict_mode=ict_mode)
-                    outputs.append(output_s.float())  # cast back to float32 for metrics
+                    output_s = model(inputs, targets, select_dataset,
+                                     demos_x=demos_x[:, s],    # [B, K, T, N, F]
+                                     demos_y=demos_y[:, s],     # [B, K, T, N, F]
+                                     ict_mode=ict_mode)
+                    outputs.append(output_s)
                 output = torch.stack(outputs).mean(dim=0)        # [B, T, N, 1]
 
                 if args.real_value == False:
@@ -469,11 +533,12 @@ class Trainer(object):
                 mape += batch_mape * mape_count
                 total_count += mae_count
                 total_mape_count += mape_count
-                total_batch += len(y_lbl)
-                print(f'[ICT] batch {total_batch}, MAE: {batch_mae:.4f}, RMSE: {batch_rmse:.4f}, MAPE: {batch_mape:.4f}')
+                total_samples += len(y_lbl)
+                batch_idx += 1
+                print(f'[ICT] batch {batch_idx}/{num_batches}, samples {total_samples}, MAE: {batch_mae:.4f}, RMSE: {batch_rmse:.4f}, MAPE: {batch_mape:.4f}')
 
                 # Free GPU memory between batches
-                del demos_x, demos_y, demos_x_m, demos_y_m, outputs, inputs_m, targets_m
+                del demos_x, demos_y, outputs
                 if torch.cuda.is_available() and str(args.device) != 'cpu':
                     torch.cuda.empty_cache()
 
@@ -481,7 +546,7 @@ class Trainer(object):
         rmse = (rmse / total_count) ** 0.5
         mape /= total_mape_count
         print('last batch', output.shape, y_lbl.shape)
-        print(total_batch, total_count, total_mape_count)
+        print(batch_idx, total_count, total_mape_count)
 
         logger.info("ICT Test — MAE: {:.2f}, RMSE: {:.2f}, MAPE: {:.4f}%, CORR: {:.4f}".format(
             mae, rmse, mape * 100, corr))

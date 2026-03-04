@@ -6,3 +6,4 @@ model/train_log.txt
 
 # Model weight files
 model_weights/*/aggregator_best.pth
+model_weights/*/aggregator_ckpt.pth
