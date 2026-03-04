@@ -133,16 +133,21 @@ Tested v2 residual correction with KNN similarity-matched demos ($\arg\min_d \| 
 
 ---
 
-## Experiment 8: [PENDING] Learned Demo Aggregation (K=3, KNN)
+## Experiment 8: Learned Demo Aggregation (K=3, KNN)
 
-Replace naive average with learned aggregation module. Base model frozen, KNN demo selection, K=3. Two variants:
+Replace naive average with learned aggregation module. Base model frozen, KNN demo selection (raw-input L2), K=3.
 
-| Variant | Params | Architecture |
-|---------|--------|-------------|
-| `attention` | ~30K | cross-attention + sigmoid gating |
-| `simple` | ~8K | cosine similarity → softmax weights |
+**Aggregator**: DemoAggregator (cross-attention), ~198K params, 4 heads, proj_dim=128.
+**Training**: 10 epochs, lr=1e-4, early stop patience=5. Best model at epoch 4 (val_loss=4.678804).
 
-Training: 5 epochs, lr=1e-4. Purpose: improve over naive averaging baseline (Exp 7 K=3: MAE 4.66).
+| Epochs | MAE | RMSE | MAPE% | CORR | vs ZS | Status |
+|--------|-----|------|-------|------|-------|--------|
+| 10 | **4.29** | **7.71** | **11.42** | **0.7483** | **+4.7%** | Done |
+| 3 | TBD | TBD | TBD | TBD | TBD | PENDING |
+
+> **Note**: 10-epoch result achieved +4.7% improvement over zero-shot (MAE 4.50→4.29). However, OpenCity's few-shot setup trains for only 3 epochs. A 3-epoch experiment is needed for fair comparison.
+
+**Test details** (10-epoch): 71 batches, total_mae_count=295,028,352, total_mape_count=295,028,352.
 
 ---
 
@@ -161,4 +166,5 @@ Training: 5 epochs, lr=1e-4. Purpose: improve over naive averaging baseline (Exp
 | 7 | Residual correction | KNN | 1 | 1 | 5.61 | 10.04 | 14.23 | 0.625 | -25% | Done |
 | 7 | Residual correction | KNN | 3 | 1 | **4.66** | 8.11 | 11.92 | 0.729 | -3.6% | Done |
 | 7 | Residual correction | KNN | 1 | 10 | 5.61 | 10.04 | 14.23 | 0.625 | -25% | Done |
-| 8 | Learned aggregation | KNN | 3 | 1 | TBD | TBD | TBD | TBD | TBD | PENDING |
+| 8 | Learned agg (attn, 10ep) | KNN | 3 | 1 | **4.29** | **7.71** | **11.42** | **0.748** | **+4.7%** | Done |
+| 8 | Learned agg (attn, 3ep) | KNN | 3 | 1 | TBD | TBD | TBD | TBD | TBD | PENDING |

@@ -176,7 +176,8 @@ where $\mathbf{h}$ are encoder features and $\mathbf{c}_k = \mathbf{Y}_k - f_\th
 | Residual + Random | rand | 3 | 6.14 | 9.53 | 14.84 | 0.634 | -36% |
 | Residual + KNN | raw | 3 | 4.66 | 8.11 | 11.92 | 0.729 | -3.6% |
 | Residual + Enc-KNN | emb | 3 | TBD | | | | |
-| **Ours** | emb | 3 | **TBD** | | | | |
+| **Ours (3ep)** | raw | 3 | **TBD** | | | | |
+| Ours (10ep) | raw | 3 | 4.29 | 7.71 | 11.42 | 0.748 | +4.7% |
 
 **Narrative**: (1) Random demo selection hurts — confirms that demo *quality* matters. (2) KNN retrieval nearly recovers zero-shot. (3) Embedding retrieval + learned aggregation outperforms zero-shot, achieving ICL benefit.
 
@@ -203,11 +204,12 @@ All with naive averaging, K=3. Shows that semantic similarity in embedding space
 | Cosine similarity | 8K | TBD | TBD | TBD |
 | MLP | 70K | TBD | TBD | TBD |
 | Gated | 130K | TBD | TBD | TBD |
-| **Cross-attention** | **198K** | **TBD** | | |
+| **Cross-attention (3ep)** | **198K** | **TBD** | | |
+| Cross-attention (10ep) | 198K | 4.29 | 7.71 | 11.42 |
 
 All with best retrieval, K=3. Shows that learned aggregation meaningfully improves over naive averaging, and cross-attention captures richer query-demo interactions than simpler alternatives.
 
-**Experiments needed**: Exp 3a-3e.
+> **Note**: OpenCity few-shot trains prediction heads for 3 epochs. The 3-epoch row is the fair comparison; the 10-epoch row shows aggregator capacity with extended training.
 
 ### 4.5 Effect of Demonstration Count K (0.3 page) → **Figure 3**
 

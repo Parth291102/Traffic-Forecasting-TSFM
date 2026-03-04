@@ -35,14 +35,17 @@ Each correction $c_k = y_k - f(x_k)$ captures the model's systematic error on a 
 
 > See `docs/07_paper_framework.md` for the full paper skeleton and experiment→section mapping.
 
-### Phase 1: Baseline Completion → Paper §4.2 Table 1, §4.4 Table 3 (~4h GPU) **[P0]**
+### Phase 1: Baseline Completion → Paper §4.2 Table 1, §4.4 Table 3 (~5h GPU) **[P0]**
 
 **Goal**: Get exact metrics for existing aggregator configurations.
 
-| ID | Experiment | Paper target | GPU time |
-|----|-----------|-------------|----------|
-| 1a | Rerun Exp 8 test (attention, 198K) — bug fixed | Table 1 "Ours", Table 3 "Attention" | ~2h |
-| 1b | Train + test SimpleDemoAggregator (8K) | Table 3 "Cosine" | ~3h |
+| ID | Experiment | Paper target | GPU time | Status |
+|----|-----------|-------------|----------|--------|
+| 1a | Rerun Exp 8 test (attention, 198K, 10ep) | Table 3 "Attention (10ep)" | ~2h | **Done**: MAE=4.29 |
+| 1a' | Retrain attention aggregator (3 epochs) for fair comparison with OpenCity few-shot | Table 1 "Ours", Table 3 "Attention (3ep)" | ~1h | PENDING |
+| 1b | Train + test SimpleDemoAggregator (8K) | Table 3 "Cosine" | ~3h | PENDING |
+
+> **Fair comparison note**: OpenCity few-shot trains for 3 epochs. Our current 10-epoch result (MAE=4.29) uses more training budget. Experiment 1a' (3-epoch) provides the fair comparison; 10-epoch result serves as an upper bound showing aggregator capacity.
 
 ### Phase 2: Embedding-Space Retrieval → Paper §4.3 Table 2 (~6h GPU) **[P0]**
 
@@ -184,7 +187,8 @@ Figures 4-5, qualitative analysis. Mainly post-processing.
 ## 5. Implementation Checklist
 
 ### P0 — Minimum Viable Paper
-- [ ] 1a: Rerun Exp 8 test → exact MAE/RMSE/MAPE/CORR → Table 1, Table 3
+- [x] 1a: Rerun Exp 8 test (10ep) → MAE=4.29, RMSE=7.71, MAPE=11.42%, CORR=0.7483
+- [ ] 1a': Retrain attention aggregator (3 epochs) for fair comparison → Table 1, Table 3
 - [ ] 1b: Train + test SimpleDemoAggregator → Table 3
 - [ ] 2: Implement `demo_selection='embedding'` in `ict_data_process.py`
 - [ ] 2: Precompute encoder features for demo pool
