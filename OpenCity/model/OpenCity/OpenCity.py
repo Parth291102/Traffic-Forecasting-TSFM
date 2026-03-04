@@ -380,55 +380,37 @@ class OpenCity(nn.Module):
         ICT forward pass via Residual Correction.
 
         Each input (query and demos) is processed independently through the
-        standard 24-patch forward path — identical to pretraining. Demo ground-
-        truth futures are used to estimate the model's systematic error, which
-        is then subtracted from the query prediction.
+        standard 24-patch forward path — identical to pretraining.
 
         Args:
-            input:   [B, T, N, F]   — query history
-            lbls:    [B, T, N, F]   — query future (only temporal features used)
-            demos_x: [B, K, T, N, F] — demonstration histories
-            demos_y: [B, K, T, N, F] — demonstration futures (ground-truth flow + temporal)
-            select_dataset: str — dataset identifier
+            input:   [B, T, N, F]     — query history
+            lbls:    [B, T, N, F]     — query future (temporal features only)
+            demos_x: [B, K, T, N, F]  — demonstration histories
+            demos_y: [B, K, T, N, F]  — demonstration futures (GT flow + temporal)
+            select_dataset: str
 
         Returns:
-            [B, T, N, 1] — corrected prediction for query
+            [B, T, N, 1] — corrected prediction
         """
         bs, time_steps, num_nodes, num_feas = input.size()
         K = demos_x.shape[1]
         assert demos_x.dim() == 5, f"demos_x must be [B, K, T, N, F], got {demos_x.shape}"
-        assert demos_x.shape[0] == bs, f"demo batch size mismatch: {demos_x.shape[0]} vs {bs}"
+        assert demos_x.shape[0] == bs
 
-        # ===== K=0 fallback: identical to forward() =====
         if K == 0:
             return self.forward(input, lbls, select_dataset)
 
-        # ===== STEP 1: Standard query prediction (24 patches, same as forward) =====
+        # Query prediction
         pred_query = self.forward(input, lbls, select_dataset)  # [B, T, N, 1]
 
-        # ===== STEP 2: For each demo, predict its future and compute residual =====
-        residuals = []  # List of [B, T, N, 1]
+        # Demo residuals
+        residuals = []
         for k in range(K):
-            dk_x = demos_x[:, k]  # [B, T, N, F] — demo history
-            dk_y = demos_y[:, k]  # [B, T, N, F] — demo ground-truth future
+            dk_pred = self.forward(demos_x[:, k], demos_y[:, k], select_dataset)
+            residuals.append(demos_y[:, k, ..., :self.output_dim] - dk_pred)
 
-            # Demo's ground-truth flow values
-            dk_gt_flow = dk_y[..., :self.output_dim]   # [B, T, N, 1]
-
-            # Model's prediction for this demo (standard 24-patch forward)
-            dk_pred = self.forward(dk_x, dk_y, select_dataset)  # [B, T, N, 1]
-
-            # Residual = ground truth - prediction (model's systematic error)
-            residual_k = dk_gt_flow - dk_pred  # [B, T, N, 1]
-            residuals.append(residual_k)
-
-        # ===== STEP 3: Average residuals and correct query prediction =====
         avg_residual = torch.stack(residuals, dim=0).mean(dim=0)  # [B, T, N, 1]
-
-        # Corrected prediction
-        pred_corrected = pred_query + avg_residual  # [B, T, N, 1]
-
-        return pred_corrected
+        return pred_query + avg_residual
 
     def _forward_with_features(self, input, lbls, select_dataset):
         """Standard forward that also returns encoder features for the aggregator.
@@ -483,14 +465,14 @@ class OpenCity(nn.Module):
     def forward_ict_learned(self, input, lbls, demos_x, demos_y, select_dataset):
         """ICT forward pass with learned demo aggregation.
 
-        Instead of naive averaging of residuals, uses a DemoAggregator to
-        compute attention-weighted corrections based on query-demo similarity.
+        Uses a DemoAggregator to compute attention-weighted corrections
+        based on query-demo encoder feature similarity.
 
         Args:
-            input:   [B, T, N, F]     — query history
-            lbls:    [B, T, N, F]     — query future (temporal features)
-            demos_x: [B, K, T, N, F]  — demonstration histories
-            demos_y: [B, K, T, N, F]  — demonstration futures (GT flow + temporal)
+            input:   [B, T, N, F]
+            lbls:    [B, T, N, F]
+            demos_x: [B, K, T, N, F]
+            demos_y: [B, K, T, N, F]
             select_dataset: str
 
         Returns:
@@ -507,19 +489,16 @@ class OpenCity(nn.Module):
         pred_query, query_feat = self._forward_with_features(input, lbls, select_dataset)
 
         # Demo forwards with features
-        demo_feats_list = []
         corrections_list = []
+        demo_feats_list = []
         for k in range(K):
-            dk_x = demos_x[:, k]
-            dk_y = demos_y[:, k]
-            dk_gt_flow = dk_y[..., :self.output_dim]  # [B, T, N, 1]
-            dk_pred, dk_feat = self._forward_with_features(dk_x, dk_y, select_dataset)
-            corrections_list.append(dk_gt_flow - dk_pred)
+            dk_pred, dk_feat = self._forward_with_features(
+                demos_x[:, k], demos_y[:, k], select_dataset)
+            corrections_list.append(demos_y[:, k, ..., :self.output_dim] - dk_pred)
             demo_feats_list.append(dk_feat)
 
-        # Stack: [B, K, N, D] and [B, K, T, N, 1]
-        demo_feats = torch.stack(demo_feats_list, dim=1)
-        corrections = torch.stack(corrections_list, dim=1)
+        corrections = torch.stack(corrections_list, dim=1)  # [B, K, T, N, 1]
+        demo_feats = torch.stack(demo_feats_list, dim=1)    # [B, K, N, D]
 
         # Learned aggregation
         weighted_corr = self.demo_aggregator(query_feat, demo_feats, corrections)
