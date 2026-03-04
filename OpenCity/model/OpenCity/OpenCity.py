@@ -375,12 +375,14 @@ class OpenCity(nn.Module):
 
         return skip
 
-    def forward_ict(self, input, lbls, demos_x, demos_y, select_dataset):
+    def forward_ict(self, input, lbls, demos_x, demos_y, select_dataset,
+                     chunk_size: int = 2):
         """
-        ICT forward pass via Residual Correction.
+        ICT forward pass via Residual Correction (chunked batched inference).
 
-        Each input (query and demos) is processed independently through the
-        standard 24-patch forward path — identical to pretraining.
+        Query and all K demos are stacked into a single batch and processed
+        in chunks of `chunk_size` groups (each group = B samples) to reduce
+        kernel-launch overhead while bounding memory.
 
         Args:
             input:   [B, T, N, F]     — query history
@@ -388,6 +390,7 @@ class OpenCity(nn.Module):
             demos_x: [B, K, T, N, F]  — demonstration histories
             demos_y: [B, K, T, N, F]  — demonstration futures (GT flow + temporal)
             select_dataset: str
+            chunk_size: int — how many (1+K) groups to forward together (default 2)
 
         Returns:
             [B, T, N, 1] — corrected prediction
@@ -400,16 +403,27 @@ class OpenCity(nn.Module):
         if K == 0:
             return self.forward(input, lbls, select_dataset)
 
-        # Query prediction
-        pred_query = self.forward(input, lbls, select_dataset)  # [B, T, N, 1]
+        # Stack query + K demos  → (1+K) groups, each [B, T, N, F]
+        all_x = [input] + [demos_x[:, k] for k in range(K)]     # list of (1+K)
+        all_l = [lbls]   + [demos_y[:, k] for k in range(K)]
 
-        # Demo residuals
-        residuals = []
-        for k in range(K):
-            dk_pred = self.forward(demos_x[:, k], demos_y[:, k], select_dataset)
-            residuals.append(demos_y[:, k, ..., :self.output_dim] - dk_pred)
+        # Chunked forward
+        all_preds = []  # will collect (1+K) tensors of [B, T, N, 1]
+        G = 1 + K
+        for start in range(0, G, chunk_size):
+            end = min(start + chunk_size, G)
+            chunk_x = torch.cat(all_x[start:end], dim=0)  # [(end-start)*B, T, N, F]
+            chunk_l = torch.cat(all_l[start:end], dim=0)
+            chunk_pred = self.forward(chunk_x, chunk_l, select_dataset)
+            all_preds.append(chunk_pred)
 
-        avg_residual = torch.stack(residuals, dim=0).mean(dim=0)  # [B, T, N, 1]
+        preds = torch.cat(all_preds, dim=0)  # [(1+K)*B, T, N, 1]
+        preds = preds.view(G, bs, time_steps, num_nodes, self.output_dim)
+
+        pred_query = preds[0]                       # [B, T, N, 1]
+        demo_preds = preds[1:]                       # [K, B, T, N, 1]
+        demo_gt = demos_y[..., :self.output_dim].permute(1, 0, 2, 3, 4)  # [K, B, T, N, F_out]
+        avg_residual = (demo_gt - demo_preds).mean(dim=0)  # [B, T, N, 1]
         return pred_query + avg_residual
 
     def _forward_with_features(self, input, lbls, select_dataset):
@@ -462,11 +476,13 @@ class OpenCity(nn.Module):
 
         return skip, enc_feat
 
-    def forward_ict_learned(self, input, lbls, demos_x, demos_y, select_dataset):
-        """ICT forward pass with learned demo aggregation.
+    def forward_ict_learned(self, input, lbls, demos_x, demos_y, select_dataset,
+                             chunk_size: int = 2):
+        """ICT forward pass with learned demo aggregation (chunked batched inference).
 
-        Uses a DemoAggregator to compute attention-weighted corrections
-        based on query-demo encoder feature similarity.
+        Query and all K demos are stacked and forwarded in chunks to reduce
+        kernel-launch overhead.  Uses a DemoAggregator for attention-weighted
+        corrections.
 
         Args:
             input:   [B, T, N, F]
@@ -474,6 +490,7 @@ class OpenCity(nn.Module):
             demos_x: [B, K, T, N, F]
             demos_y: [B, K, T, N, F]
             select_dataset: str
+            chunk_size: int — groups per chunk (default 2)
 
         Returns:
             [B, T, N, 1] — corrected prediction
@@ -485,20 +502,33 @@ class OpenCity(nn.Module):
         if K == 0:
             return self.forward(input, lbls, select_dataset)
 
-        # Query forward with features
-        pred_query, query_feat = self._forward_with_features(input, lbls, select_dataset)
+        # Stack query + K demos  → (1+K) groups, each [B, T, N, F]
+        all_x = [input] + [demos_x[:, k] for k in range(K)]
+        all_l = [lbls]   + [demos_y[:, k] for k in range(K)]
 
-        # Demo forwards with features
-        corrections_list = []
-        demo_feats_list = []
-        for k in range(K):
-            dk_pred, dk_feat = self._forward_with_features(
-                demos_x[:, k], demos_y[:, k], select_dataset)
-            corrections_list.append(demos_y[:, k, ..., :self.output_dim] - dk_pred)
-            demo_feats_list.append(dk_feat)
+        # Chunked forward with features
+        all_preds = []
+        all_feats = []
+        G = 1 + K
+        for start in range(0, G, chunk_size):
+            end = min(start + chunk_size, G)
+            chunk_x = torch.cat(all_x[start:end], dim=0)
+            chunk_l = torch.cat(all_l[start:end], dim=0)
+            chunk_pred, chunk_feat = self._forward_with_features(
+                chunk_x, chunk_l, select_dataset)
+            all_preds.append(chunk_pred)
+            all_feats.append(chunk_feat)
 
-        corrections = torch.stack(corrections_list, dim=1)  # [B, K, T, N, 1]
-        demo_feats = torch.stack(demo_feats_list, dim=1)    # [B, K, N, D]
+        preds = torch.cat(all_preds, dim=0).view(G, bs, time_steps, num_nodes, self.output_dim)
+        feats = torch.cat(all_feats, dim=0).view(G, bs, num_nodes, -1)
+
+        pred_query = preds[0]              # [B, T, N, 1]
+        query_feat = feats[0]              # [B, N, D]
+        demo_preds = preds[1:]             # [K, B, T, N, 1]
+        demo_feats = feats[1:].permute(1, 0, 2, 3)  # [B, K, N, D]
+
+        demo_gt = demos_y[..., :self.output_dim].permute(1, 0, 2, 3, 4)  # [K, B, T, N, 1]
+        corrections = (demo_gt - demo_preds).permute(1, 0, 2, 3, 4)      # [B, K, T, N, 1]
 
         # Learned aggregation
         weighted_corr = self.demo_aggregator(query_feat, demo_feats, corrections)

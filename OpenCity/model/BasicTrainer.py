@@ -27,8 +27,7 @@ class Trainer(object):
         self.best_path = os.path.join(self.args.log_dir, self.args.save_pretrain_path)
         self.loss_figure_path = os.path.join(self.args.log_dir, 'loss.png')
         # log
-        if os.path.isdir(args.log_dir) == False and not args.debug:
-            os.makedirs(args.log_dir, exist_ok=True)
+        os.makedirs(args.log_dir, exist_ok=True)
         self.logger = get_logger(args.log_dir, name=args.model, debug=args.debug)
         self.logger.info('Experiment log path in: {}'.format(args.log_dir))
 
@@ -78,7 +77,7 @@ class Trainer(object):
         if self.args.mode != 'pretrain' and self.args.val_ratio > 0:
             self.model.load_state_dict(best_model)
             self.test(self.model, self.args, self.scaler_dict, self.test_dataloader, self.logger)
-        print("Pre-train finish.")
+        self.logger.info("Pre-train finish.")
 
 
     def multi_train_eps(self):
@@ -166,15 +165,18 @@ class Trainer(object):
                 total_count += mae_count
                 total_mape_count += mape_count
                 total_batch += len(y_lbl)
-                if args.model == 'OpenCity':
-                    print(total_batch, batch_mae, batch_rmse, batch_mape, total_count, total_mape_count)
+                logger.info(
+                    f'[Test] batch {total_batch}, '
+                    f'MAE={batch_mae:.4f}, RMSE={batch_rmse:.4f}, MAPE={batch_mape:.4f}, '
+                    f'mae_count={mae_count}, mape_count={mape_count}'
+                )
         mae /= total_count
         rmse = (rmse / total_count) ** 0.5
         mape /= total_mape_count
-        print('last batch', output.shape, y_lbl.shape)
-        print(total_batch, total_count, total_mape_count)
 
-        logger.info("Average Horizon, MAE: {:.2f}, RMSE: {:.2f}, MAPE: {:.4f}%, CORR:{:.4f}".format(
+        logger.info(f'[Test] === Summary ===')
+        logger.info(f'[Test] total_samples={total_batch}, total_mae_count={total_count}, total_mape_count={total_mape_count}')
+        logger.info("[Test] MAE: {:.2f}, RMSE: {:.2f}, MAPE: {:.4f}%, CORR: {:.4f}".format(
             mae, rmse, mape * 100, corr))
 
     def _precompute_ict_cache(self, dataloader, cache_dir, desc='Precompute'):
@@ -398,9 +400,10 @@ class Trainer(object):
 
                 total_loss += loss.item()
                 step += 1
-                if step % args.log_step == 0:
-                    self.logger.info(f'[Aggregator] epoch {epoch} batch {i} '
-                                     f'train_loss={total_loss / step:.6f}')
+                self.logger.info(
+                    f'[Aggregator] epoch {epoch} batch {i}/{len(indices)}, '
+                    f'batch_loss={loss.item():.6f}, avg_loss={total_loss / step:.6f}'
+                )
 
             train_loss = total_loss / max(step, 1)
             self.logger.info(f'[Aggregator] Epoch {epoch}: train_loss={train_loss:.6f}')
@@ -535,7 +538,11 @@ class Trainer(object):
                 total_mape_count += mape_count
                 total_samples += len(y_lbl)
                 batch_idx += 1
-                print(f'[ICT] batch {batch_idx}/{num_batches}, samples {total_samples}, MAE: {batch_mae:.4f}, RMSE: {batch_rmse:.4f}, MAPE: {batch_mape:.4f}')
+                logger.info(
+                    f'[ICT] batch {batch_idx}/{num_batches}, samples={total_samples}, '
+                    f'MAE={batch_mae:.4f}, RMSE={batch_rmse:.4f}, MAPE={batch_mape:.4f}, '
+                    f'mae_count={mae_count}, mape_count={mape_count}'
+                )
 
                 # Free GPU memory between batches
                 del demos_x, demos_y, outputs
@@ -545,8 +552,8 @@ class Trainer(object):
         mae /= total_count
         rmse = (rmse / total_count) ** 0.5
         mape /= total_mape_count
-        print('last batch', output.shape, y_lbl.shape)
-        print(batch_idx, total_count, total_mape_count)
 
-        logger.info("ICT Test — MAE: {:.2f}, RMSE: {:.2f}, MAPE: {:.4f}%, CORR: {:.4f}".format(
+        logger.info(f'[ICT] === Test Summary ===')
+        logger.info(f'[ICT] total_batches={batch_idx}, total_mae_count={total_count}, total_mape_count={total_mape_count}')
+        logger.info("[ICT] MAE: {:.2f}, RMSE: {:.2f}, MAPE: {:.4f}%, CORR: {:.4f}".format(
             mae, rmse, mape * 100, corr))

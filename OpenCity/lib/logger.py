@@ -15,25 +15,29 @@ def get_logger(root, name=None, debug=True):
     if logger.handlers:
         return logger
 
-    # define the formate
-    formatter = logging.Formatter('%(asctime)s: %(message)s', "%Y-%m-%d %H:%M")
+    # define the format
+    formatter = logging.Formatter('%(asctime)s: %(message)s', "%Y-%m-%d %H:%M:%S")
     # create another handler for output log to console
     console_handler = logging.StreamHandler()
     if debug:
         console_handler.setLevel(logging.DEBUG)
     else:
         console_handler.setLevel(logging.INFO)
-        # create a handler for write log to file
-        logfile = os.path.join(root, 'run.log')
-        print('Creat Log File in: ', logfile)
-        file_handler = logging.FileHandler(logfile, mode='w')
-        file_handler.setLevel(logging.DEBUG)
-        file_handler.setFormatter(formatter)
     console_handler.setFormatter(formatter)
-    # add Handler to logger
     logger.addHandler(console_handler)
-    if not debug:
-        logger.addHandler(file_handler)
+
+    # Always save log to file (append mode to preserve across runs)
+    logfile = os.path.join(root, 'run.log')
+    print('Log file: ', logfile)
+    file_handler = logging.FileHandler(logfile, mode='a')
+    file_handler.setLevel(logging.DEBUG)
+    file_handler.setFormatter(formatter)
+    logger.addHandler(file_handler)
+
+    # Log a run separator for readability in appended log files
+    logger.info('=' * 60)
+    logger.info(f'New run started at {datetime.now().strftime("%Y-%m-%d %H:%M:%S")}')
+    logger.info('=' * 60)
     return logger
 
 
