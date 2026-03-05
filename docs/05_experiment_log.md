@@ -133,21 +133,40 @@ Tested v2 residual correction with KNN similarity-matched demos ($\arg\min_d \| 
 
 ---
 
-## Experiment 8: Learned Demo Aggregation (K=3, KNN)
+## Experiment 8a: Learned Demo Aggregation — Attention, 10 epochs (K=3, KNN)
 
 Replace naive average with learned aggregation module. Base model frozen, KNN demo selection (raw-input L2), K=3.
 
 **Aggregator**: DemoAggregator (cross-attention), ~198K params, 4 heads, proj_dim=128.
 **Training**: 10 epochs, lr=1e-4, early stop patience=5. Best model at epoch 4 (val_loss=4.678804).
+**Weights**: `aggregator_best_exp8_attn_10ep_K3_knn.pth` (best), `aggregator_ckpt_exp8_attn_10ep_K3_knn.pth` (checkpoint)
 
-| Epochs | MAE | RMSE | MAPE% | CORR | vs ZS | Status |
-|--------|-----|------|-------|------|-------|--------|
-| 10 | **4.29** | **7.71** | **11.42** | **0.7483** | **+4.7%** | Done |
-| 3 | TBD | TBD | TBD | TBD | TBD | PENDING |
+| MAE | RMSE | MAPE% | CORR | vs ZS |
+|-----|------|-------|------|-------|
+| **4.29** | **7.71** | **11.42** | **0.7483** | **+4.7%** |
 
-> **Note**: 10-epoch result achieved +4.7% improvement over zero-shot (MAE 4.50→4.29). However, OpenCity's few-shot setup trains for only 3 epochs. A 3-epoch experiment is needed for fair comparison.
+**Test details**: 71 batches, 4493 samples, total_mae_count=295,028,352, total_mape_count=295,028,352.
 
-**Test details** (10-epoch): 71 batches, total_mae_count=295,028,352, total_mape_count=295,028,352.
+> Achieved +4.7% improvement over zero-shot (MAE 4.50→4.29). Best model at epoch 4; early stopped after epoch 9 (patience=5).
+
+---
+
+## Experiment 8b: Learned Demo Aggregation — Attention, 3 epochs (K=3, KNN)
+
+Same setup as Exp 8a but limited to 3 epochs for **fair comparison** with OpenCity's few-shot protocol (which uses 3 epochs).
+
+**Aggregator**: DemoAggregator (cross-attention), ~198K params, 4 heads, proj_dim=128.
+**Training**: 3 epochs, lr=1e-4. Val loss improved monotonically: epoch 0 → 4.7933, epoch 1 → 4.7399, epoch 2 → 4.7005 (best).
+**Weights**: `aggregator_best.pth`
+**Timing**: Phase 1 (pre-compute) ~3h17m; Phase 2 (aggregator training) ~5s; test inference ~2.5h.
+
+| MAE | RMSE | MAPE% | CORR | vs ZS |
+|-----|------|-------|------|-------|
+| **4.30** | **7.68** | **11.37** | **0.7482** | **+4.4%** |
+
+**Test details**: 71 batches, 4493 samples, total_mae_count=295,028,352, total_mape_count=295,028,352.
+
+> Achieved +4.4% improvement over zero-shot (MAE 4.50→4.30). Nearly identical to the 10-epoch result (Exp 8a: MAE 4.29), confirming that 3 epochs are sufficient — the aggregator converges rapidly from cached features. This provides a **fair comparison** with OpenCity's few-shot protocol.
 
 ---
 
@@ -166,5 +185,5 @@ Replace naive average with learned aggregation module. Base model frozen, KNN de
 | 7 | Residual correction | KNN | 1 | 1 | 5.61 | 10.04 | 14.23 | 0.625 | -25% | Done |
 | 7 | Residual correction | KNN | 3 | 1 | **4.66** | 8.11 | 11.92 | 0.729 | -3.6% | Done |
 | 7 | Residual correction | KNN | 1 | 10 | 5.61 | 10.04 | 14.23 | 0.625 | -25% | Done |
-| 8 | Learned agg (attn, 10ep) | KNN | 3 | 1 | **4.29** | **7.71** | **11.42** | **0.748** | **+4.7%** | Done |
-| 8 | Learned agg (attn, 3ep) | KNN | 3 | 1 | TBD | TBD | TBD | TBD | TBD | PENDING |
+| 8a | Learned agg (attn, 10ep) | KNN | 3 | 1 | **4.29** | **7.71** | **11.42** | **0.748** | **+4.7%** | Done |
+| 8b | Learned agg (attn, 3ep) | KNN | 3 | 1 | **4.30** | **7.68** | **11.37** | **0.748** | **+4.4%** | Done |
