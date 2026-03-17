@@ -14,7 +14,7 @@
 
 \begin{document}
 
-\title{Lightweight In-Context Learning for Pretrained Spatio-Temporal Foundation Models}
+\title{Lightweight In-Context Learning for Pretrained\\Spatio-Temporal Foundation Models}
 
 \author{
 \IEEEauthorblockN{Xuesi Zhou}
@@ -39,54 +39,347 @@ pparikh2@ncsu.edu}
 \maketitle
 
 \begin{abstract}
-% TODO: Expand after outline confirmation
+Pretrained spatio-temporal foundation models such as OpenCity achieve strong zero-shot traffic forecasting, but performance degrades under cross-city distribution shifts.
+In NLP and time-series domains, in-context learning (ICL) allows models to adapt predictions using retrieved demonstrations at inference time, yet ICL remains unexplored for spatio-temporal foundation models.
+The standard ICL approach of feeding demonstrations into the model's context window cannot be directly applied: spatio-temporal foundation models are typically pretrained on fixed-length sequences, and extending sequences with demonstrations produces out-of-distribution attention patterns that degrade performance by 9--28\%.
+We propose a lightweight, pluggable ICL module that keeps the base model completely frozen.
+A small aggregation network (198K parameters) is trained offline in seconds from cached features; at inference time, KNN retrieves the most similar training examples, and the aggregator combines their prediction errors into a query-specific correction without any test-time weight updates.
+On PEMS07M, our method reduces MAE from 4.50 to 4.29 (+4.7\%) with only 0.8\% additional parameters, approaching full-shot supervised baselines while the backbone remains entirely frozen.
 \end{abstract}
 
 \begin{IEEEkeywords}
-traffic forecasting, in-context learning, foundation models, spatio-temporal prediction, test-time adaptation
+traffic forecasting, in-context learning, foundation models, spatio-temporal prediction, demonstration-based adaptation
 \end{IEEEkeywords}
 
 \section{Introduction}
-% TODO: Expand after outline confirmation
+
+Accurate traffic forecasting supports urban applications such as route planning and signal control.
+Traditional spatio-temporal models such as STGCN~\cite{yu2018stgcn} and Graph WaveNet~\cite{wu2019graphwavenet} achieve strong supervised performance but require per-dataset training with target-domain labels.
+OpenCity~\cite{li2024opencity} represents a new paradigm: a spatio-temporal foundation model (ST~FM) pretrained on large-scale heterogeneous traffic data, achieving zero-shot transfer across cities, data categories, and time horizons through an architecture integrating Transformers with graph neural networks.
+However, despite strong zero-shot capability, performance degrades under larger cross-city distribution shifts.
+For example, on the SZ-DIDI and CD-DIDI datasets, OpenCity's zero-shot MAE falls noticeably behind full-shot supervised baselines, exposing the limits of purely static zero-shot inference.
+OpenCity addresses this through gradient-based fine-tuning of its prediction head (3~epochs on target-domain data), which improves performance but raises the question: can demonstration-based adaptation at inference time complement or rival fine-tuning for ST~foundation models?
+
+In NLP, in-context learning (ICL) offers this capability, allowing foundation models to adapt by conditioning on demonstrations without gradient updates~\cite{brown2020gpt3}.
+Chen~et~al.~\cite{chen2022ict} formalize ICL as a meta-learning objective through In-Context Tuning (ICT), training language models to predict target labels given concatenated instruction, in-context examples, and query.
+ICT bridges prompting, fine-tuning, and meta-learning into a unified framework, outperforming gradient-based meta-learning such as MAML~\cite{finn2017maml} by leveraging the language model's pattern-matching inductive bias.
+Das~et~al.~\cite{das2024icf} extend ICL to time-series foundation models through In-Context Fine-Tuning (ICF), adapting TimesFM~\cite{das2024timesfm} to use related time series in its context window via separator tokens and cross-example attention.
+TimesFM-ICF achieves 7--25\% improvement over the base model, even rivaling per-dataset fine-tuning.
+These results show that providing related examples at inference time helps models adapt, not only in language but also in numerical forecasting.
+Yet ICL remains unexplored for spatio-temporal foundation models.
+
+Both ICT and TimesFM-ICF enable ICL by modifying the model, either through fine-tuning or continued pretraining with architectural changes.
+For spatio-temporal foundation models, such modification is non-trivial.
+ST~FMs are typically pretrained on fixed-length input sequences with specific attention patterns and positional encodings; OpenCity, for instance, uses 24~patches (288~timesteps).
+Naively extending input sequences to include demonstrations causes out-of-distribution self-attention patterns, positional encoding mismatches, and temporal-categorical cross-attention failures.
+Our preliminary experiments confirm this: naive sequence extension degrades MAE by 9--28\% versus zero-shot (Section~\ref{sec:analysis}).
+Enabling native ICL would require architectural modification and continued pretraining, at high cost and with the risk of degrading pretrained representations.
+This motivates an approach that never extends the model's input sequence: process query and demonstrations independently through the standard forward path, and combine their information only in output space.
+
+We propose \textbf{ICL-Traffic}, a residual correction framework for enabling demonstration-based adaptation in frozen ST~FMs.
+Each demonstration's prediction error estimates the model's bias on similar inputs; a learned aggregation network combines these errors into a query-specific correction.
+Two axes drive improvement: (1)~KNN retrieval ensures each query receives relevant demonstrations from a training-set demo pool, and (2)~a learned aggregator (8K--198K parameters) replaces naive averaging with query-aware weighting.
+The base model remains completely frozen; the aggregator is trained offline in seconds from cached features.
+Our contributions are:
+
+\begin{enumerate}
+\item We are the first to bring in-context learning to spatio-temporal foundation models. Inspired by ICT~\cite{chen2022ict} and TimesFM-ICF~\cite{das2024icf}, we propose a residual correction framework that enables demonstration-based adaptation for frozen ST~FMs without architectural modification or base model retraining.
+
+\item We systematically study two axes of the framework---demonstration retrieval (random vs.\ KNN) and correction aggregation (naive average vs.\ cosine similarity vs.\ cross-attention)---showing both are critical and jointly necessary to surpass zero-shot performance.
+
+\item On PEMS07M with OpenCity-plus, our best configuration achieves +4.7\% MAE improvement (4.50$\to$4.29) with only 198K external parameters (${\sim}$0.8\% of the base model). We further plan a direct comparison against OpenCity's 3-epoch fast adaptation on SZ-DIDI and CD-DIDI under the same training budget.
+\end{enumerate}
 
 \section{Related Work}
-% TODO: Expand after outline confirmation
 
 \subsection{Spatio-Temporal Foundation Models}
 
+Traditional spatio-temporal models such as STGCN~\cite{yu2018stgcn}, Graph WaveNet~\cite{wu2019graphwavenet}, AGCRN~\cite{bai2020agcrn}, and ASTGCN~\cite{guo2019astgcn} achieve strong supervised performance but require per-dataset training with target-domain labels.
+Recent foundation models address this through large-scale pretraining across multiple cities and data types.
+
+OpenCity~\cite{li2024opencity}, our base model, integrates Transformer architecture with graph neural networks.
+It employs instance normalization for distribution shift handling, patch embedding for long-horizon prediction, and temporal-categorical joint attention.
+Pretrained on heterogeneous multi-city traffic data covering flow, speed, and demand categories, OpenCity achieves zero-shot performance competitive with full-shot baselines across six benchmark datasets and demonstrates promising scaling laws.
+When zero-shot performance is insufficient, OpenCity provides fast adaptation via 3-epoch fine-tuning of its prediction head on target-domain data.
+However, this remains gradient-based adaptation; in-context learning has not been explored for OpenCity or any other ST~FM.
+
+Other ST~FMs include UniST~\cite{yuan2024unist}, which uses prompt-based universal prediction; UrbanGPT~\cite{li2024urbangpt}, which integrates spatio-temporal prediction with a large language model backbone; and FlashST~\cite{li2024flashst}, which uses prompt-tuning for fast adaptation.
+All adapt via fine-tuning or prompt-tuning; none explores ICL.
+
 \subsection{In-Context Learning}
 
-\subsection{Test-Time Adaptation}
+GPT-3~\cite{brown2020gpt3} first showed that large language models can adapt to new tasks through few-shot demonstrations in the input context, without gradient updates.
+
+Chen~et~al.~\cite{chen2022ict} formalize this through In-Context Tuning (ICT).
+ICT recasts few-shot learning as sequence prediction: given concatenated instruction, labeled in-context examples, and a target query, the model is trained to predict the target label.
+By meta-training across diverse NLP tasks, ICT teaches language models to \textit{learn from demonstrations} as a general capability.
+ICT outperforms gradient-based meta-learning (MAML~\cite{finn2017maml}) by leveraging the language model's inductive bias for pattern matching, and reduces sensitivity to example ordering (6$\times$) and selection (2$\times$).
+The core insight relevant to our work is that models can be trained to extract useful patterns from contextual examples and apply them to novel queries.
+
+Das~et~al.~\cite{das2024icf} extend ICL to time-series foundation models through In-Context Fine-Tuning (ICF).
+Starting from TimesFM~\cite{das2024timesfm}, they introduce separator tokens between in-context examples, enable cross-example causal attention, and remove positional encoding for length generalization.
+Through continued pretraining, the model learns to borrow patterns from related time series in its context window.
+TimesFM-ICF achieves 7--25\% improvement over the base model and even surpasses per-dataset fine-tuning on the Monash benchmark, showing that ICL extends beyond language to numerical forecasting.
+However, TimesFM-ICF requires both architectural modification and continued pretraining.
+We share the goal of leveraging related examples for inference-time adaptation, but pursue a complementary approach: keep the ST~model completely frozen and achieve adaptation through output-space residual correction.
 
 \section{Method}
-% TODO: Expand after outline confirmation
 
 \subsection{Problem Formulation}
 
+Consider a traffic network represented as a graph $\mathcal{G} = (\mathcal{V}, \mathcal{E}, \mathbf{A})$ with $N = |\mathcal{V}|$ sensor nodes and adjacency matrix $\mathbf{A} \in \mathbb{R}^{N \times N}$.
+Given historical observations $\mathbf{X} \in \mathbb{R}^{T \times N \times F}$ over $T$ time steps with $F$ features per node, the goal is to predict future values $\mathbf{Y} \in \mathbb{R}^{T' \times N}$ over the next $T'$ steps.
+
+Let $f_\theta$ denote a frozen pretrained ST~foundation model with parameters $\theta$, producing predictions $\hat{\mathbf{Y}} = f_\theta(\mathbf{X})$.
+We assume access to a demonstration pool $\mathcal{D} = \{(\mathbf{X}_d, \mathbf{Y}_d)\}_{d=1}^{|\mathcal{D}|}$ from the target-domain training set, where ground truth $\mathbf{Y}_d$ is available.
+Given a test query $\mathbf{X}_q$, our goal is to select $K$ demonstrations from $\mathcal{D}$ and produce an improved prediction $\hat{\mathbf{Y}}_q$ that surpasses $f_\theta(\mathbf{X}_q)$, without modifying $\theta$.
+
 \subsection{Residual Correction Framework}
+
+We estimate and correct the frozen model's prediction error using demonstrations.
+For each selected demonstration $(\mathbf{X}_k, \mathbf{Y}_k)$, we compute the residual correction:
+\begin{equation}
+\mathbf{c}_k = \mathbf{Y}_k - f_\theta(\mathbf{X}_k)
+\end{equation}
+which captures the model's bias on input $\mathbf{X}_k$.
+The corrected prediction for query $\mathbf{X}_q$ is:
+\begin{equation}
+\hat{\mathbf{Y}}_q = f_\theta(\mathbf{X}_q) + \mathrm{Aggregate}\!\left(\{\mathbf{c}_k\}_{k=1}^K\right)
+\label{eq:correction}
+\end{equation}
+
+This framework has several desirable properties.
+First, every input is processed through the model's standard forward path with no sequence extension, eliminating out-of-distribution risk.
+Second, when $K = 0$, the framework degenerates to the original zero-shot prediction.
+Third, when corrections are uncorrelated noise (i.e., random demonstrations), the expected aggregate converges to zero as sampling rounds increase, recovering zero-shot performance---a property we verify experimentally.
+
+Like ICT~\cite{chen2022ict} and TimesFM-ICF~\cite{das2024icf}, our method uses demonstrations to adapt predictions at inference time, but we operate entirely in output space without modifying the base model.
 
 \subsection{Demonstration Retrieval}
 
+The quality of residual corrections depends critically on the similarity between demonstrations and the query.
+We investigate two retrieval strategies.
+
+\textbf{Random selection} samples $K$ demonstrations uniformly from $\mathcal{D}$.
+Because randomly selected demos have low correlation with the query, their corrections are effectively noise.
+With $K=3$, random selection yields MAE~6.14, which is 36\% worse than zero-shot, confirming that demo quality matters.
+
+\textbf{Raw-input KNN} retrieves the $K$ nearest neighbors based on L2 distance in the flattened input space:
+\begin{equation}
+\mathcal{N}_K(\mathbf{X}_q) = \underset{\mathcal{S} \subset \mathcal{D},\, |\mathcal{S}|=K}{\arg\min} \sum_{d \in \mathcal{S}} \|\mathrm{vec}(\mathbf{X}_q) - \mathrm{vec}(\mathbf{X}_d)\|_2
+\end{equation}
+This simple approach dramatically improves over random selection (MAE 6.14$\to$4.66 for $K=3$).
+KNN retrieval is deterministic, meaning multiple sampling rounds $S$ have no effect, which confirms that demo-query alignment is the key factor rather than averaging over more samples.
+
+A planned extension uses \textbf{embedding-space KNN}, computing distances in the frozen encoder's feature space (node-mean pooled, 512~dimensions), which should better capture semantic similarity.
+
 \subsection{Learned Aggregation}
 
+Naive uniform averaging $(1/K)\sum_{k=1}^K \mathbf{c}_k$ dilutes informative corrections with residual noise, failing to surpass zero-shot performance.
+We replace it with a learned aggregation module:
+\begin{equation}
+\hat{\mathbf{C}} = \mathrm{Aggregator}\!\left(\mathbf{h}_q,\; \{\mathbf{h}_k\}_{k=1}^K,\; \{\mathbf{c}_k\}_{k=1}^K\right)
+\end{equation}
+where $\mathbf{h}_q$ and $\mathbf{h}_k$ are encoder features extracted from the frozen model.
+We study two architectures.
+
+\subsubsection{SimpleDemoAggregator (${\sim}$8K parameters)}
+Query and demonstration encoder features are projected to a shared low-dimensional space.
+Cosine similarity between the query projection and each demo projection produces attention scores, which are normalized via temperature-scaled softmax to yield per-demo weights.
+The final correction is a weighted sum of $\{\mathbf{c}_k\}$.
+This design gives interpretable weights and achieves MAE~4.47.
+
+\subsubsection{Cross-Attention Aggregator (${\sim}$198K parameters)}
+Multi-head cross-attention is applied with the query features as queries and demonstration features as keys and values.
+Each attention head produces a weighted combination of corrections.
+A learned head-combine layer merges the per-head outputs, and an adaptive output gate (zero-initialized softplus for training stability) scales the final correction.
+This architecture captures richer query-demo interactions and achieves MAE~4.29--4.30.
+
+\subsubsection{Training Procedure}
+Training proceeds in two phases.
+\textbf{Phase~1} (one-time, ${\sim}$3h GPU): the frozen base model runs forward passes over all training windows, precomputing and caching predictions $f_\theta(\mathbf{X}_d)$, encoder features $\mathbf{h}_d$, and corrections $\mathbf{c}_d = \mathbf{Y}_d - f_\theta(\mathbf{X}_d)$ for every $d \in \mathcal{D}$.
+\textbf{Phase~2} (aggregator training, ${\sim}$5 seconds): the aggregator is trained from cached data only, with no forward or backward pass through the base model, using Adam with learning rate $10^{-4}$ and MAE loss.
+The base model is used only once during Phase~1; all subsequent training and inference operate on cached features.
+
 \section{Experiments}
-% TODO: Expand after outline confirmation
 
 \subsection{Experimental Setup}
 
+\textbf{Dataset.}
+PEMS07M contains 228 sensor nodes recording highway traffic speed at 5-minute intervals.
+We use a 50/10/40 train/validation/test split, yielding a demonstration pool of 5,761 training windows.
+
+\textbf{Base model.}
+OpenCity-plus~\cite{li2024opencity} with embedding dimension 512, encoder depth 6, 16 attention heads, and ${\sim}$26M parameters.
+PEMS07M is unseen during OpenCity's pretraining, making this a genuine zero-shot transfer setting.
+
+\textbf{Metrics.}
+Mean Absolute Error (MAE), Root Mean Squared Error (RMSE), Mean Absolute Percentage Error (MAPE, \%), and Pearson Correlation (CORR).
+
+\textbf{Implementation.}
+PyTorch 2.4.1 on NVIDIA L40S (46GB), fp32 precision.
+
 \subsection{Main Results}
+
+Table~\ref{tab:main} presents our main results on PEMS07M.
+The progression tells a clear story.
+First, random demonstrations severely degrade performance (MAE 4.50$\to$6.14, $-$36\%), confirming that uncorrelated corrections introduce harmful noise.
+Second, KNN retrieval dramatically recovers over random (6.14$\to$4.66) but still does not surpass zero-shot, showing that retrieval is necessary but not sufficient.
+Third, learned aggregation crosses the zero-shot threshold---both SimpleDemoAggregator (4.47) and Cross-Attention (4.30) surpass the 4.50 baseline.
+Fourth, our best result (MAE~4.29, +4.7\%) approaches full-shot supervised baselines such as GWN~\cite{wu2019graphwavenet} (4.17) and ASTGCN~\cite{guo2019astgcn} (4.39) while the backbone remains entirely frozen.
+
+\begin{table}[t]
+\centering
+\caption{Main results on PEMS07M. All ICL methods use $K{=}3$. Best in \textbf{bold}.}
+\label{tab:main}
+\setlength{\tabcolsep}{3pt}
+\scriptsize
+\resizebox{\columnwidth}{!}{%
+\begin{tabular}{@{}llrcccc@{}}
+\toprule
+Method & Retrieval & Params & MAE$\downarrow$ & RMSE$\downarrow$ & MAPE\%$\downarrow$ & CORR$\uparrow$ \\
+\midrule
+Zero-Shot & --- & 0 & 4.50 & 8.21 & 12.20 & 0.736 \\
+\midrule
+Res.\ + Random & random & 0 & 6.14 & 9.53 & 14.84 & 0.634 \\
+Res.\ + KNN & raw-L2 & 0 & 4.66 & 8.11 & 11.92 & 0.729 \\
+Simple Agg & raw-L2 & 8K & 4.47 & 8.01 & 11.55 & 0.737 \\
+Cross-Attn (3ep) & raw-L2 & 198K & \textbf{4.30} & \textbf{7.68} & \textbf{11.37} & \textbf{0.748} \\
+Cross-Attn (10ep) & raw-L2 & 198K & 4.29 & 7.71 & 11.42 & 0.748 \\
+\midrule
+\multicolumn{7}{@{}l}{\textit{Full-shot supervised baselines (from \cite{li2024opencity})}} \\
+GWN~\cite{wu2019graphwavenet} & --- & full & 4.17 & --- & --- & --- \\
+ASTGCN~\cite{guo2019astgcn} & --- & full & 4.39 & --- & --- & --- \\
+STGCN~\cite{yu2018stgcn} & --- & full & 4.44 & --- & --- & --- \\
+\bottomrule
+\end{tabular}
+}
+\end{table}
 
 \subsection{Ablation: Demonstration Selection Strategy}
 
+Table~\ref{tab:demo_selection} isolates the effect of demonstration retrieval with naive averaging.
+Random selection with $K{=}1$ yields MAE~7.39 ($-$64\% vs.\ zero-shot); increasing to $K{=}3$ reduces variance but remains far below zero-shot (6.14, $-$36\%).
+Multi-round sampling ($S{=}10$) with random selection partially recovers by averaging out noise (5.24, $-$16\%), but cannot match KNN.
+With KNN, even $K{=}1$ (MAE~5.61) outperforms random $K{=}3$, and $K{=}3$ (MAE~4.66) approaches the zero-shot baseline.
+Demo-query alignment is the dominant factor.
+
+\begin{table}[t]
+\centering
+\caption{Ablation: demonstration selection strategy. All with naive averaging. $S$: sampling rounds.}
+\label{tab:demo_selection}
+\begin{tabular}{@{}lccccr@{}}
+\toprule
+Selection & $K$ & $S$ & MAE & RMSE & vs ZS \\
+\midrule
+Random & 1 & 1 & 7.39 & 12.00 & $-$64\% \\
+Random & 3 & 1 & 6.14 & 9.53 & $-$36\% \\
+Random & 1 & 10 & 5.24 & 8.52 & $-$16\% \\
+\midrule
+KNN (raw-L2) & 1 & 1 & 5.61 & 10.04 & $-$25\% \\
+KNN (raw-L2) & 3 & 1 & 4.66 & 8.11 & $-$3.6\% \\
+\bottomrule
+\end{tabular}
+\end{table}
+
 \subsection{Ablation: Aggregation Architecture}
 
+Table~\ref{tab:aggregation} compares aggregation strategies, all using KNN retrieval with $K{=}3$.
+Naive averaging (0~parameters) achieves MAE~4.66 but cannot surpass zero-shot.
+The SimpleDemoAggregator (8K~parameters) learns cosine-similarity-based weights and achieves 4.47, crossing the zero-shot threshold.
+The Cross-Attention Aggregator (198K~parameters) captures richer query-demo interactions and achieves the best result of 4.30 at 3~epochs, with minimal further improvement at 10~epochs (4.29).
+The 3-epoch convergence point is noteworthy: it matches the training budget of OpenCity's fast adaptation protocol, enabling a direct comparison of adaptation mechanisms under the same epoch budget.
+
+\begin{table}[t]
+\centering
+\caption{Ablation: aggregation architecture. All with KNN ($K{=}3$).}
+\label{tab:aggregation}
+\begin{tabular}{@{}lrcccc@{}}
+\toprule
+Aggregator & Params & MAE$\downarrow$ & RMSE$\downarrow$ & MAPE\%$\downarrow$ & CORR$\uparrow$ \\
+\midrule
+Naive average & 0 & 4.66 & 8.11 & 11.92 & 0.729 \\
+Cosine sim.\ (5ep) & 8K & 4.47 & 8.01 & 11.55 & 0.737 \\
+Cross-attn (3ep) & 198K & \textbf{4.30} & \textbf{7.68} & \textbf{11.37} & \textbf{0.748} \\
+Cross-attn (10ep) & 198K & 4.29 & 7.71 & 11.42 & 0.748 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
 \subsection{Analysis}
+\label{sec:analysis}
+
+\textbf{Why random demonstrations hurt.}
+Random corrections are uncorrelated with the query's prediction error.
+Averaging such noise introduces systematic distortion.
+As the number of sampling rounds $S \to \infty$, the average correction converges to the population mean error across all training windows, effectively recovering zero-shot performance.
+This confirms that random demonstrations carry no query-specific signal.
+
+\textbf{Why KNN is necessary but not sufficient.}
+Similar inputs yield correlated prediction errors, making KNN-retrieved corrections informative.
+However, naive uniform averaging dilutes the signal: even among the $K$ nearest neighbors, residual noise remains.
+Learned weighting is needed to focus on the most relevant corrections and suppress outliers.
+
+\textbf{Why learned aggregation crosses the threshold.}
+The aggregator learns query-aware weights that focus on the most relevant corrections.
+Even the SimpleDemoAggregator (8K~parameters) surpasses zero-shot, confirming that learned weighting improves over uniform averaging.
+The Cross-Attention Aggregator captures richer interactions through multi-head attention, yielding the largest improvement.
+
+\textbf{Convergence.}
+The aggregator converges by epoch~3--4 from cached features (${\sim}$5~seconds total).
+The 3-epoch result (MAE~4.30) nearly matches 10-epoch (4.29), confirming rapid convergence and providing a fair-comparison epoch budget with OpenCity's fast adaptation.
+
+\textbf{Failed approach: naive sequence extension.}
+We initially attempted standard ICL by concatenating demonstrations into the model's input sequence.
+This caused out-of-distribution self-attention patterns and positional encoding mismatches, degrading MAE by 9--28\% versus zero-shot.
+This failure motivates our output-space residual correction approach.
+
+\textbf{Per-query retrieval vs.\ fine-tuning.}
+Fine-tuning aggregates gradient signals from all training examples equally into weight updates, producing a globally adapted model.
+Our method allows training examples highly similar to a specific test query to exert disproportionate influence through KNN retrieval and learned aggregation.
+This per-query adaptation may be particularly beneficial under distribution shifts where the demo pool contains local structure that a global weight update would dilute.
 
 \section{Discussion and Future Work}
-% TODO: Expand after outline confirmation
+
+\subsection{Limitations}
+
+\textbf{Compute overhead.}
+Our method requires $K{+}1$ forward passes per test sample (4$\times$ for $K{=}3$).
+This is partially offset by the fact that demonstration forward passes can be precomputed and cached during Phase~1.
+
+\textbf{Output-space correction, not true ICL.}
+Demonstrations do not enter the model's attention context; corrections are applied in output space only.
+This is a practical constraint of the fixed-length pretraining of current ST~FMs.
+True ICL, where the model attends over demonstrations and query jointly as in ICT~\cite{chen2022ict} and TimesFM-ICF~\cite{das2024icf}, would require architectural modification and continued pretraining.
+
+\textbf{Trainable parameters.}
+Our aggregation module requires an offline training phase (${\sim}$5~seconds from cached features).
+Like fine-tuning, we use target-domain training data.
+The difference is in how data is used: fine-tuning absorbs training data into model weights, producing a single globally adapted model; our method preserves training data as a retrievable demo pool, and the aggregator learns a general correction weighting strategy.
+At inference time, per-query variation comes from demo retrieval, not from the aggregator weights (which are fixed for all queries).
+
+\textbf{Retrieval ceiling.}
+Raw-input L2 KNN may miss semantic similarity in high-dimensional feature space.
+Embedding-space KNN using the frozen encoder's representations should improve retrieval quality.
+
+\subsection{Planned Experiments}
+
+Several extensions are planned to strengthen the empirical evaluation.
+\textbf{Embedding-space KNN}: using frozen encoder features (node-mean pooling, 512~dimensions) for retrieval, expected to improve over raw-input L2 distance.
+\textbf{K sweep}: evaluating $K \in \{1, 3, 5\}$ for both naive averaging and Cross-Attention aggregation.
+\textbf{Multi-dataset validation}: experiments on SZ-DIDI and CD-DIDI for a direct comparison against OpenCity's fast adaptation (3-epoch prediction head fine-tuning) under the same training budget but a different adaptation mechanism.
+\textbf{Detailed analysis}: per-hour MAE curves, attention weight visualization, and per-node improvement maps.
+
+In the longer term, the goal is a spatio-temporal foundation model natively capable of ICL, analogous to TimesFM-ICF~\cite{das2024icf}, which would require continued pretraining with cross-example attention.
+Our output-space correction provides initial evidence for this direction.
 
 \section{Conclusion}
-% TODO: Expand after outline confirmation
+
+We are the first to bring in-context learning to spatio-temporal foundation models.
+Inspired by In-Context Tuning~\cite{chen2022ict} and TimesFM-ICF~\cite{das2024icf}, we propose a residual correction framework that enables demonstration-based adaptation for frozen ST~FMs without architectural modification.
+Our key findings: (1)~demonstration retrieval quality is the dominant factor, as random demonstrations hurt while KNN retrieval is necessary but not sufficient alone; (2)~learned aggregation via cross-attention crosses the zero-shot threshold, confirming that both retrieval and aggregation are jointly needed; (3)~the best configuration achieves +4.7\% MAE improvement with only 198K parameters (${\sim}$0.8\% of the base model), approaching full-shot supervised baselines.
+Our method differs from test-time adaptation (no test-time gradient updates) and complements fine-tuning (same training data, different usage).
+Within the broader ICL progression---ICT trains models for ICL, TimesFM-ICF enables ICL via continued pretraining---our work shows that output-space ICL through demo retrieval and correction works even with a frozen model.
 
 \bibliographystyle{IEEEtran}
 \bibliography{refs}
