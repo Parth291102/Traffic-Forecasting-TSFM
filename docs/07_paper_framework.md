@@ -6,38 +6,39 @@
 
 ## Abstract (~200 words)
 
-**Structure**: Problem → Gap → Method → Key Results → Significance
+**Structure**: Problem+Gap → Challenge → Method → Key Results
 
-> Pretrained spatio-temporal foundation models (e.g., OpenCity, UniST) achieve strong zero-shot traffic forecasting, but lack the ability to adapt predictions using task-specific demonstrations at test time — a capability known as in-context learning (ICL). Naively extending input sequences to include demonstrations violates the model's fixed-length pretraining assumption, causing severe performance degradation. We propose **ICL-Traffic**, a lightweight, pluggable module that enables in-context adaptation for *any* frozen traffic foundation model through two components: (1) a **residual correction framework** that estimates model bias from demonstration prediction errors, and (2) a **learned aggregation module** (~200K trainable parameters) that attends over demonstration-query feature similarity to produce context-aware corrections. We further improve demonstration quality via **embedding-space retrieval**, replacing raw-input KNN with encoder-feature similarity matching. On PEMS07M, our method reduces MAE from [ZS baseline] to [best result], achieving [X%] improvement with only ~0.8% additional parameters relative to the base model. The module requires no gradient flow through the backbone, trains in [Y] minutes from cached features, and transfers across datasets without re-architecture.
+> Pretrained spatio-temporal foundation models (e.g., OpenCity) achieve strong zero-shot traffic forecasting, but performance degrades under cross-city distribution shifts. In NLP and time-series domains, in-context learning (ICL) has emerged as a powerful adaptation mechanism — enabling models to condition predictions on retrieved demonstrations at inference time — yet ICL remains entirely unexplored for spatio-temporal foundation models. The standard ICL approach (feeding demonstrations into the model's context window) cannot be directly applied: OpenCity is pretrained on fixed-length sequences (24 patches), and extending sequences with demonstrations produces OOD attention patterns that degrade MAE by 9–28%. We propose **ICL-Traffic**, a lightweight, pluggable module that keeps the base ST model completely frozen. A small aggregation network (~200K params) is trained offline in seconds from cached features; at inference time, KNN retrieves the K most similar training examples, and the aggregator combines their prediction errors into a query-specific correction without any test-time weight updates. On PEMS07M, our method reduces MAE from 4.50 to 4.29 (+4.7%) with only ~0.8% additional parameters (~198K of 26M base), approaching full-shot supervised baselines while the backbone remains entirely frozen.
 
-**Experiments needed**: Final best MAE number, training time, parameter ratio.
+**Experiments needed**: Multi-dataset results (SZ-DIDI, CD-DIDI planned).
 
 ---
 
 ## 1. Introduction (1 page)
 
-### Para 1: Traffic Foundation Models — Success and Limitation
-- Pretrained ST models (OpenCity, UniST, STEP, TrafficBERT) achieve strong zero/few-shot forecasting
-- But: predictions are *static* — same model, same behavior, regardless of test context
-- In NLP/vision, foundation models improve at test time via in-context learning (ICL)
-- **Gap**: No existing work enables ICL for frozen traffic foundation models
+### Para 1: ST Foundation Models and the ICL Gap
+- Traffic forecasting is critical for urban management; traditional ST models require per-dataset training
+- OpenCity [li2024opencity] achieves strong zero-shot transfer but degrades under larger cross-city distribution shifts (SZ-DIDI, CD-DIDI)
+- In NLP and time-series, ICL has emerged as a powerful adaptation paradigm: ICT [chen2022ict] formalizes ICL as meta-learning; TimesFM-ICF [das2024icf] demonstrates ICL for time-series FMs, rivaling per-dataset fine-tuning
+- **Research gap**: ICL has never been explored for spatio-temporal foundation models
 
-### Para 2: Challenge — Why ICL is Hard for Traffic Models
-- NLP ICL: prepend demonstrations to input sequence, model attends across demo+query jointly
-- Traffic models: pretrained on *fixed-length* sequences (e.g., 288 timesteps = 24 patches)
-- Extending sequence → OOD attention patterns, positional encoding mismatch, precision issues
-- Our Exp 2-4: naive concatenation degrades MAE by 9-28% (cite our ablations)
+### Para 2: Challenge — Why Standard ICL Cannot Be Applied
+- Standard ICL: feed demonstrations into model's context window; model attends jointly over demos + query
+- OpenCity pretrained on fixed 24-patch sequences; extending to K×48+24 patches → OOD self-attention, positional encoding mismatch, TC cross-attention failures
+- Our Exp 2-4: naive sequence extension degrades MAE by 9-28% versus zero-shot
+- Enabling native ICL requires architectural modification + continued pretraining — risks eroding pretrained knowledge
+- This motivates an output-space approach: process query and demos independently through the standard forward path
 
 ### Para 3: Our Approach — Residual Correction + Learned Aggregation
 - Key insight: process query and demos *independently* through the frozen model, combine in *output space*
 - Residual correction: each demo's prediction error estimates the model's systematic bias for similar inputs
-- Two innovations: (a) embedding-space retrieval for higher-quality demos; (b) learned cross-attention aggregation to replace naive averaging
-- Only ~200K new parameters, no backbone modification, trains from cached features in minutes
+- At inference time, aggregator weights (fixed, learned offline) + query-specific KNN demo retrieval (variable) jointly produce per-query adapted predictions
+- Only ~198K external parameters (~0.8% of 26M base), no backbone modification, trains from cached features in **seconds**
 
 ### Para 4: Contributions (3 bullet points)
-1. A general residual correction framework for enabling ICL in frozen ST foundation models
-2. A lightweight learned aggregation module with embedding-space demo retrieval
-3. Systematic ablation study on retrieval strategies, aggregation architectures, and demonstration count K
+1. First to bring in-context learning to spatio-temporal foundation models; residual correction framework for frozen ST FMs without architectural modification or base model retraining
+2. Systematic study of two adaptation axes: demonstration retrieval (random vs. KNN) and correction aggregation (naive average vs. cosine similarity vs. cross-attention), showing both are critical and jointly necessary to surpass zero-shot
+3. +4.7% MAE on PEMS07M (4.50→4.29, 198K params); direct comparison with OpenCity fast-adapt on SZ-DIDI/CD-DIDI under same 3-epoch budget (planned)
 
 ### Figure 1: Method Overview Diagram
 Left: standard zero-shot inference. Right: ICL-Traffic pipeline (query → frozen model → prediction; demos → frozen model → corrections; aggregator combines).
@@ -54,15 +55,15 @@ Left: standard zero-shot inference. Right: ICL-Traffic pipeline (query → froze
 - Limitation: no test-time adaptation beyond the prediction head
 
 ### 2.2 In-Context Learning
-- Origin in NLP: GPT-3 [Brown et al.], prompt engineering
-- Recent extension to vision: visual prompting [ref], in-context segmentation [ref]
-- In time series: recent work on ICL for time-series forecasting [ref — check if any exist]
-- **Gap**: no ICL framework for pretrained ST models with graph structure
+- Origin in NLP: GPT-3 [brown2020gpt3] demonstrates ICL via few-shot prompting [1 sentence]
+- **ICT** [chen2022ict] (core reference — our idea source): formalizes ICL as meta-learning; trains LMs to learn from in-context examples across tasks; outperforms gradient-based MAML; reduces sensitivity to example ordering/selection. Core insight: models can be trained to extract useful patterns from contextual examples at inference time.
+- **TimesFM-ICF** [das2024icf] (core reference — application reference): first to enable ICL for time-series FMs; adds separator tokens + cross-example attention + removes positional encoding; achieves 7-25% improvement over base FM, surpassing per-dataset fine-tuning on some benchmarks. Core insight: related examples at inference time help adapt to target distributions.
+- **Gap**: ICL has been established in NLP (ICT) and time-series (TimesFM-ICF) but remains entirely unexplored for ST foundation models with graph structure.
 
 ### 2.3 Test-Time Adaptation
-- TTT [Sun et al.], TENT [Wang et al.], TTA for time series [ref]
-- Difference from our work: TTA modifies model parameters; we freeze the backbone entirely
-- Our method is complementary — the aggregation module could combine with TTA
+- TTT [sun2020ttt], TENT [wang2021tent] adapt models at test time via self-supervised objectives or entropy minimization; recent work extends to time-series (COSA, TAFAS) [brief, 2 sentences]
+- Positioning note: fine-tuning (OpenCity fast-adapt) and our method both use target-domain training data — the difference is utilization: fine-tuning absorbs data into model weights; our method preserves data as a retrievable demo pool
+- Key distinction from TTA: TTA requires test-time gradient updates; our aggregator is trained once offline and applied at inference with no gradient updates; our method is complementary to both fine-tuning and TTA
 
 **Experiments needed**: None (literature review).
 

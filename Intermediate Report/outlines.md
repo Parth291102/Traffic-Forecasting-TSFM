@@ -13,50 +13,48 @@
 
 ## Abstract Outline (~200 words)
 
-- **Problem**: Pretrained spatio-temporal foundation models (e.g., OpenCity [1]) achieve strong zero-shot traffic forecasting, but performance degrades under cross-city distribution shifts. The only available adaptation path — gradient-based fine-tuning of the prediction head — operates at the dataset level: it adjusts model weights once for the entire target domain, providing no mechanism to tailor predictions to individual test queries. Furthermore, fine-tuning modifies base model parameters, which risks eroding the broadly generalizable representations learned during pretraining.
-- **Opportunity**: In-context learning (ICL) offers an alternative: at inference time, the model conditions each prediction on a small set of retrieved demonstrations, enabling per-query adaptation without any weight updates. ICL has been formalized as a meta-learning objective in NLP via in-context tuning [2] and demonstrated effective for time-series foundation models via in-context fine-tuning [3], yet remains entirely unexplored for spatio-temporal foundation models.
-- **Method**: Inspired by [2] and [3], we propose a lightweight, pluggable ICL module that keeps the base ST foundation model completely frozen. Two phases: (1) offline — a small aggregation network (8K-198K params) is trained in seconds from cached features to learn *how to weight corrections*, not what to predict; (2) online — for each test query, KNN retrieves similar demonstrations, the frozen model estimates their prediction errors, and the trained aggregator applies a per-query correction at inference time with zero gradient updates.
+- **Problem + Gap**: Pretrained spatio-temporal foundation models (e.g., OpenCity [1]) achieve strong zero-shot traffic forecasting but still suffer performance degradation under cross-city distribution shifts. In NLP and time-series domains, in-context learning (ICL) has emerged as a powerful adaptation mechanism — enabling models to condition predictions on retrieved demonstrations at inference time. ICL has been formalized as a meta-learning objective via in-context tuning [2] and extended to time-series foundation models via in-context fine-tuning [3]. However, ICL remains entirely unexplored for spatio-temporal foundation models.
+- **Challenge**: The standard ICL mechanism — feeding demonstrations into the model's context window for joint attention over demos and query — cannot be directly applied to ST foundation models like OpenCity. OpenCity is pretrained on fixed-length sequences (288 timesteps = 24 patches); concatenating K demonstrations extends the sequence to K×48+24 patches, producing out-of-distribution self-attention patterns, positional encoding mismatches, and TC cross-attention failures. Our preliminary experiments confirm this: naive sequence extension degrades MAE by 9–28% versus zero-shot. Enabling native ICL would require architectural modification and continued pretraining — substantial cost that risks eroding the pretrained representations.
+- **Method**: We propose a lightweight, pluggable ICL module for frozen ST foundation models. A small aggregation network (8K-198K params) is trained offline from cached features to learn a general correction weighting strategy. At inference time, for each test query, KNN retrieves the K most similar training examples; the frozen model's prediction errors on these demonstrations are aggregated into a query-specific correction — adapting each prediction to its local traffic context without any test-time weight updates.
 - **Key Result**: On PEMS07M with OpenCity-plus, our best configuration reduces MAE from 4.50 to 4.29 (+4.7%) with only 198K trainable parameters (~0.8% of the 26M-param base model), approaching full-shot supervised baselines while the backbone remains entirely frozen.
 
 ---
 
 ## Section I: Introduction
 
-### Para 1 — OpenCity: Success, Limitations, and Opportunity
+### Para 1 — ST Foundation Models and the Distribution Shift Problem
 
 - Traffic forecasting is critical for urban management. Traditional ST models (STGCN, GWN, etc.) achieve strong supervised performance but require per-dataset training. [1-2 sentences, cite briefly]
 - **OpenCity** [li2024opencity] represents a new paradigm: a spatio-temporal foundation model pretrained on large-scale heterogeneous traffic data, achieving zero-shot transfer across cities, data categories, and time horizons. It integrates Transformer architecture with GNNs and demonstrates promising scaling laws.
-- **Limitation 1**: Despite strong zero-shot capability, performance degrades under larger cross-city distribution shifts. For example, on SZ-DIDI and CD-DIDI, OpenCity's zero-shot MAE falls noticeably behind full-shot supervised baselines, exposing the limits of purely static zero-shot inference.
-- **Limitation 2**: The only available adaptation mechanism is gradient-based fine-tuning — updating the prediction head for 3 epochs on target-domain data. This approach has two fundamental limitations: (a) it modifies base model parameters, which risks overwriting generalizable representations acquired during pretraining; (b) it operates at the *dataset level* — once fine-tuned, the model produces the same prediction behavior for every test query, with no mechanism to leverage individual query-relevant historical examples at inference time.
-- **Opportunity**: These limitations point to a missing capability: *per-query inference-time adaptation*, i.e., the ability to condition each prediction on retrieved demonstrations without touching model weights. OpenCity's strong frozen representations make it a prime candidate for such an approach.
+- **However**, despite strong zero-shot capability, performance degrades under larger cross-city distribution shifts. For example, on SZ-DIDI and CD-DIDI, OpenCity's zero-shot MAE falls noticeably behind full-shot supervised baselines, exposing the limits of purely static zero-shot inference.
+- **Current adaptation**: OpenCity provides gradient-based fine-tuning of the prediction head (3 epochs on target-domain data). This improves performance, but the question remains: are there alternative adaptation paradigms — specifically, demonstration-based adaptation at inference time — that could complement or rival fine-tuning for ST foundation models?
 
-### Para 2 — ICL: From Meta-Learning in NLP to Time Series
+### Para 2 — ICL: A Proven Adaptation Paradigm, Missing in ST FMs
 
-- In NLP, in-context learning (ICL) allows foundation models to adapt at test time by conditioning on demonstrations, without weight updates [brown2020gpt3, brief mention].
+- In NLP, in-context learning (ICL) allows foundation models to adapt at test time by conditioning on demonstrations [brown2020gpt3, brief mention].
 - **ICT** [chen2022ict] (our idea source): Formalizes ICL as a meta-learning objective. By fine-tuning LMs to predict target labels given concatenated instruction + in-context examples + query, ICT trains models to *learn from demonstrations* as a general capability. Key contributions:
   - Bridges prompting, fine-tuning, and meta-learning into a unified framework
   - Outperforms gradient-based meta-learning (MAML) by leveraging LM inductive bias for pattern matching
   - Reduces sensitivity to example ordering (6x) and selection (2x)
-  - Core insight for our work: **models can be trained to extract useful patterns from contextual examples without modifying weights at test time**
+  - Core insight for our work: **models can be trained to extract useful patterns from contextual examples**
 - **TimesFM-ICF** [das2024icf] (our application reference): Extends ICL to time-series foundation models. The model is trained to use related time-series in its context window (via separator tokens and cross-example attention) to forecast a target series. Key contributions:
   - Demonstrates ICL works beyond language — in numerical time-series forecasting
   - Achieves 7-25% improvement over the base FM, even rivaling per-dataset fine-tuning
-  - Core insight for our work: **providing related examples at inference time helps the model adapt to target distributions without gradient updates**
-- **Our question**: Can we bring ICL capability to frozen spatio-temporal foundation models like OpenCity?
+  - Core insight for our work: **providing related examples at inference time helps the model adapt to target distributions**
+- **Research gap**: ICL has been established in NLP (ICT) and time-series (TimesFM-ICF), but remains entirely unexplored for spatio-temporal foundation models. Can we bring ICL capability to frozen ST FMs like OpenCity?
 
 ### Para 3 — Challenges and Our Approach
 
-- **Challenge — how to bring ICL to OpenCity**: Both ICT and TimesFM-ICF enable ICL by modifying the model (fine-tuning or continued pretraining with architectural changes). For ST foundation models like OpenCity, such modification is non-trivial: the model is pretrained on fixed-length sequences (288 timesteps = 24 patches) with specific attention patterns and positional encodings. Naively extending input sequences to include demonstrations causes OOD behavior and 9-28% MAE degradation in our preliminary experiments. A different approach is needed.
-- **Our insight**: Instead of modifying the model to accept demonstrations in its context window, we process query and demonstrations *independently* through the frozen model and combine their information in *output space* via residual correction. Each demo's prediction error estimates the model's systematic bias on similar inputs; aggregating these errors yields a per-query correction applied at inference time.
-- **How this differs from fine-tuning**: OpenCity's fast adaptation (3-epoch fine-tuning) trains the prediction head on target-domain data — it adjusts *what the model predicts* and produces the same adapted behavior for every subsequent query. Our aggregator, by contrast, is trained to learn *how to weight corrections from retrieved demonstrations* — a correction strategy, not a domain-specific predictor. Once trained (seconds, from cached features), it enables each test query to be individually adapted at inference time via its own retrieved demonstrations. The base model remains frozen throughout; domain adaptation comes from demonstrations, not from parameter updates.
-- **Two axes of improvement**: (1) KNN retrieval ensures each query receives relevant demonstrations; (2) learned aggregation (8K-198K params) replaces naive averaging with query-aware weighting.
-- **Direct experimental comparison**: On SZ-DIDI and CD-DIDI — the datasets where OpenCity reports its 3-epoch fast adaptation results — we run our 3-epoch aggregator under the same training budget. This provides a direct, fair comparison: same epochs, same training data, different adaptation mechanism (dataset-level weight update vs. per-query inference-time correction with frozen backbone).
+- **Challenge — how to bring ICL to ST FMs**: Both ICT and TimesFM-ICF enable ICL by modifying the model (fine-tuning or continued pretraining with architectural changes). For ST foundation models like OpenCity, such modification is non-trivial: the model is pretrained on fixed-length sequences (288 timesteps = 24 patches) with specific attention patterns and positional encodings. Naively extending input sequences to include demonstrations causes OOD self-attention patterns, positional encoding mismatches, and TC cross-attention failures — our preliminary experiments show 9-28% MAE degradation versus zero-shot. This motivates an approach that never extends the model's input sequence: process query and demonstrations independently through the standard 24-patch forward path, and combine their information only in output space.
+- **Our insight**: Instead of modifying the model to accept demonstrations in its context window, we process query and demonstrations *independently* through the frozen model and combine their information in *output space* via residual correction. Each demo's prediction error estimates the model's systematic bias on similar inputs; a learned aggregator combines these errors into a query-specific correction at inference time.
+- **Two axes of improvement**: (1) KNN retrieval ensures each query receives the most relevant demonstrations from a training-set demo pool; (2) a learned aggregation network (8K-198K params) replaces naive averaging with query-aware weighting — the aggregator learns a general correction strategy, while demo retrieval provides the per-query variation.
+- The base model remains completely frozen; the aggregator is trained offline in seconds from cached features.
 
 ### Para 4 — Contributions
 
-1. Inspired by ICT [chen2022ict] and TimesFM-ICF [das2024icf], we propose a residual correction framework that enables **per-query inference-time adaptation** for frozen ST foundation models — without architectural modification, without base model gradients, and without retraining for each new dataset.
-2. We systematically study two adaptation axes: demonstration retrieval (random vs. KNN) and correction aggregation (naive average vs. cosine similarity vs. cross-attention), showing both are critical and jointly necessary to surpass zero-shot performance.
-3. On PEMS07M with OpenCity-plus, our best configuration achieves +4.7% MAE improvement over zero-shot (4.50→4.29) with only 198K external parameters (~0.8% of the base model). Under the same 3-epoch training budget as OpenCity's fast adaptation, our frozen-backbone approach offers a direct comparison point on SZ-DIDI and CD-DIDI (planned).
+1. We are the first to bring in-context learning capability to spatio-temporal foundation models. Inspired by ICT [chen2022ict] and TimesFM-ICF [das2024icf], we propose a residual correction framework that enables demonstration-based adaptation for frozen ST FMs, without architectural modification or base model retraining.
+2. We systematically study two axes of the framework: demonstration retrieval (random vs. KNN) and correction aggregation (naive average vs. cosine similarity vs. cross-attention), showing both are critical and jointly necessary to surpass zero-shot performance.
+3. On PEMS07M with OpenCity-plus, our best configuration achieves +4.7% MAE improvement over zero-shot (4.50→4.29) with only 198K external parameters (~0.8% of the base model). We further provide a direct comparison against OpenCity's 3-epoch fast adaptation on SZ-DIDI and CD-DIDI under the same training budget (planned).
 
 ---
 
@@ -93,15 +91,16 @@
 - **Brief background**: TTA methods (TTT [sun2020ttt], TENT [wang2021tent]) adapt models at test time by updating parameters using self-supervised objectives or entropy minimization. Recent work extends TTA to time-series forecasting (COSA, TAFAS, etc.). [2-3 sentences]
 - **Positioning across adaptation paradigms** [concise]:
 
-  | Paradigm | When adapted | Base model | Granularity |
-  |----------|-------------|------------|-------------|
-  | Fine-tuning (OpenCity fast-adapt) | Once per dataset | Modified | Dataset-level |
-  | TTA (TTT, TENT) | Per test batch, at test time | Modified | Batch-level |
-  | **Ours** | Aggregator trained offline; correction applied per query | **Frozen** | **Per-query** |
+  | Paradigm | Training data | Base model | Per-query variation at inference |
+  |----------|--------------|------------|-------------------------------|
+  | Fine-tuning (OpenCity fast-adapt) | Target-domain train set | Modified | No (same model for all queries) |
+  | TTA (TTT, TENT) | Test batch statistics | Modified at test time | Per-batch |
+  | **Ours** | Target-domain train set (as demo pool) | **Frozen** | **Yes (query-specific demo retrieval)** |
+
+  > Note: Fine-tuning and our method use the same target-domain training data; the difference is utilization — absorbed into weights vs. preserved as a retrievable demo pool.
 
   - TTA requires a self-supervised signal or statistics at test time; our method uses pre-computed training demonstrations, requiring no test-time gradient
-  - TTA modifies base model parameters on every batch; our aggregator is trained once and then applied at inference with no gradient updates anywhere
-  - Our method is complementary to TTA — the aggregator's per-query correction could be further refined by TTA on top
+  - Our method is complementary to both fine-tuning and TTA — the aggregator's per-query correction could be applied on top of a fine-tuned or TTA-adapted model
 
 ---
 
@@ -124,7 +123,7 @@ $$\hat{\mathbf{Y}}_q = f_\theta(\mathbf{X}_q) + \text{Aggregate}\left(\left\{\ma
   - Zero OOD risk: each input processed through the standard forward path
   - When $K=0$, degenerates to zero-shot prediction
   - When corrections are random noise, $\mathbb{E}[\text{Aggregate}] \approx 0$, recovering zero-shot (verified experimentally)
-- **Connection to ICT/TimesFM-ICF**: Like ICT, we use demonstrations to adapt model behavior at inference time. Like TimesFM-ICF, we leverage related examples to condition predictions on target distributions. Unlike both — and unlike fine-tuning — we achieve this entirely in output space without touching any model parameters at inference time. The aggregator is trained offline to learn *a correction strategy* (how to combine residual errors), not to memorize domain-specific predictions; once trained, domain adaptation comes from the retrieved demonstrations at inference time, not from learned weights.
+- **Connection to ICT/TimesFM-ICF**: Like ICT, we use demonstrations to adapt model behavior at inference time. Like TimesFM-ICF, we leverage related examples to condition predictions on target distributions. Unlike both, we achieve this entirely in output space without modifying the base model's architecture or weights. At inference time, the aggregator (trained offline, fixed weights) provides a general correction weighting strategy, while KNN demo retrieval provides the per-query variation — each test query receives different demonstrations and therefore a different correction, even though the aggregator weights are the same for all queries.
 
 ### 3.3 Demonstration Retrieval (0.5 page)
 
@@ -154,7 +153,7 @@ $$\hat{\mathbf{C}} = \text{Aggregator}(\mathbf{h}_q, \{\mathbf{h}_k\}_{k=1}^K, \
 #### Training Procedure
 - **Phase 1** (one-time, ~3h GPU): Freeze base model; run forward passes over all training windows to precompute and cache predictions $f_\theta(\mathbf{X}_d)$, encoder features $\mathbf{h}_d$, and corrections $\mathbf{c}_d = \mathbf{Y}_d - f_\theta(\mathbf{X}_d)$
 - **Phase 2** (aggregator training, ~5 seconds): Train aggregator from cached data only — no forward pass through the base model; Adam optimizer, lr=1e-4, MAE loss, early stopping (patience 5)
-- **Key distinction from fine-tuning**: Fine-tuning requires repeated forward and backward passes through the full base model on target-domain data. Our Phase 2 operates entirely on pre-cached features and corrections — the base model is touched only once in Phase 1, and never during aggregator training or inference-time correction.
+- **Efficiency**: The base model is touched only once (Phase 1 caching). Phase 2 operates entirely on cached data — no forward or backward pass through the base model during aggregator training or inference.
 
 ---
 
@@ -191,7 +190,7 @@ Reference (full-shot supervised baselines from OpenCity paper, PEMS07M):
 | SZ-DIDI | (from paper) | (from paper) | planned |
 | CD-DIDI | (from paper) | (from paper) | planned |
 
-> Both methods use 3 epochs of adaptation. OpenCity fast-adapt modifies the prediction head (dataset-level). Our method trains a frozen-backbone aggregator (per-query at inference time).
+> Both methods use 3 epochs of training on the same target-domain training data. OpenCity fast-adapt fine-tunes the prediction head. Our method trains an external aggregator with the base model frozen. This comparison isolates the effect of the adaptation mechanism while controlling for training budget and data.
 
 **Narrative** (4-step progression):
 1. Random demos severely degrade performance (4.50→6.14, −36%) — uncorrelated corrections introduce harmful noise; demo quality is critical.
@@ -237,7 +236,7 @@ All with KNN, K=3. **Takeaway**: Learned aggregation improves over averaging; cr
 ### Limitations
 1. **Compute overhead**: K+1 forward passes per sample (4× for K=3); partially mitigated by the fact that demo forward passes can be batched and cached during Phase 1
 2. **Output-space correction, not true ICL**: Demonstrations do not enter the model's attention context — corrections are applied in output space only. This is a pragmatic constraint imposed by OpenCity's fixed-length pretraining. True ICL (where the model attends over query and demonstrations jointly, as in ICT and TimesFM-ICF) would require architectural modification and continued pretraining.
-3. **Our method has trainable parameters**: Unlike purely training-free approaches, our aggregation module requires an offline training phase. The key distinction from fine-tuning is not the absence of trainable parameters, but rather: (a) the base model remains completely frozen; (b) what is learned is a *correction strategy* (how to weight residuals), not domain-specific predictions; (c) once trained, adaptation is delivered per-query at inference time through demonstrations, not through learned weights.
+3. **Our method has trainable parameters**: Unlike purely training-free approaches, our aggregation module requires an offline training phase (~5 seconds from cached features). Like fine-tuning, we use target-domain training data. The structural difference is in how that data is utilized: fine-tuning absorbs training data into model weights (producing a single globally-adapted model); our method preserves training data as a retrievable demo pool, and the aggregator learns a general strategy for weighting corrections from retrieved demonstrations. At inference time, per-query variation comes from query-specific demo retrieval, not from the aggregator weights (which are fixed for all queries).
 4. **Retrieval ceiling**: Raw-input L2 KNN may miss semantic similarity in high-dimensional feature space; planned embedding-space KNN is expected to improve this.
 
 ### Planned Experiments (TBD)
@@ -247,8 +246,9 @@ All with KNN, K=3. **Takeaway**: Learned aggregation improves over averaging; cr
 - **Analysis**: per-hour MAE curves, attention weight visualization, per-node improvement map
 
 ### Broader Connections
-- **Adaptation paradigm spectrum**: Fine-tuning (dataset-level, modifies model) → TTA (batch-level, modifies model at test time) → ICT/TimesFM-ICF (ICL-capable model, per-query, modifies model) → **Ours** (per-query at inference, frozen backbone, external module)
-- **ICL progression**: ICT [chen2022ict] trains models to perform ICL via a meta-learning objective → TimesFM-ICF [das2024icf] extends ICL to time-series via continued pretraining → our work shows ICL-like per-query adaptation is achievable for frozen ST models via output-space correction, without any model modification
+- **ICL progression**: ICT [chen2022ict] trains models to perform ICL via a meta-learning objective → TimesFM-ICF [das2024icf] extends ICL to time-series via continued pretraining → our work shows ICL-like demonstration-based adaptation is achievable for frozen ST models via output-space correction, without any model modification
+- **Comparison with fine-tuning**: Both fine-tuning and our method use the same target-domain training data. The difference is utilization: fine-tuning absorbs all training examples into model weights (global adaptation); our method preserves them as a retrievable pool and lets each query dynamically select its most relevant subset. This query-specific demo retrieval is the source of per-query variation. We provide a direct experimental comparison with OpenCity's fast adaptation on SZ-DIDI and CD-DIDI under the same 3-epoch budget (planned).
+- **Why per-query retrieval helps** (analysis point): Fine-tuning aggregates gradient signals from all training examples equally into weight updates. Our method allows training examples highly similar to a specific test query to exert disproportionate influence on that query's prediction — through KNN retrieval and learned aggregation. This may be particularly beneficial under distribution shifts where the demo pool contains local structure that a global weight update would dilute.
 - **Future bridge**: The ideal endpoint is a spatio-temporal foundation model natively capable of ICL (analogous to TimesFM-ICF) — this would require continued pretraining of OpenCity with cross-example attention. Our output-space correction provides a practical path today and establishes the empirical case for investing in that direction.
 
 ---
