@@ -170,6 +170,21 @@ Same setup as Exp 8a but limited to 3 epochs for **fair comparison** with OpenCi
 
 ---
 
+## Experiment 9: Learned Demo Aggregation — Simple Cosine, 5 epochs (K=3, KNN)
+
+Replace naive average with SimpleDemoAggregator. Base model frozen, KNN demo selection (raw-input L2), K=3.
+
+**Aggregator**: SimpleDemoAggregator (cosine similarity), ~8K params.
+**Training**: 5 epochs, lr=1e-4.
+
+| MAE | RMSE | MAPE% | CORR | vs ZS |
+|-----|------|-------|------|-------|
+| **4.47** | **8.01** | **11.55** | **0.7370** | **+0.7%** |
+
+> Marginal improvement over zero-shot (MAE 4.50→4.47). Outperforms naive averaging (Exp 7 K=3: MAE 4.66) but falls short of the cross-attention aggregator (Exp 8a: MAE 4.29). Confirms that even a minimal learned weighting (8K params) improves over uniform averaging, while the richer cross-attention mechanism captures more useful query-demo interactions.
+
+---
+
 ## Summary Table
 
 | # | Method | Demo Selection | K | S | MAE | RMSE | MAPE% | CORR | vs ZS | Status |
@@ -187,3 +202,4 @@ Same setup as Exp 8a but limited to 3 epochs for **fair comparison** with OpenCi
 | 7 | Residual correction | KNN | 1 | 10 | 5.61 | 10.04 | 14.23 | 0.625 | -25% | Done |
 | 8a | Learned agg (attn, 10ep) | KNN | 3 | 1 | **4.29** | **7.71** | **11.42** | **0.748** | **+4.7%** | Done |
 | 8b | Learned agg (attn, 3ep) | KNN | 3 | 1 | **4.30** | **7.68** | **11.37** | **0.748** | **+4.4%** | Done |
+| 9 | Learned agg (simple, 5ep) | KNN | 3 | 1 | **4.47** | **8.01** | **11.55** | **0.737** | **+0.7%** | Done |

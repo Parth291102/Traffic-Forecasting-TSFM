@@ -4,7 +4,7 @@
 
 **Title (working)**: *Lightweight In-Context Learning for Pretrained Spatio-Temporal Foundation Models*
 
-**Core Contribution**: A training-free residual correction framework enhanced by (1) embedding-space demo retrieval and (2) a lightweight learned aggregation module (~200K params), that plugs into any frozen traffic foundation model to enable in-context adaptation — no fine-tuning, no architecture modification.
+**Core Contribution**: A base-model-frozen residual correction framework enhanced by (1) embedding-space demo retrieval and (2) a lightweight externally-trained aggregation module (~200K params), that plugs into any frozen traffic foundation model to enable per-query in-context adaptation — no base model modification, no architecture change.
 
 **Format**: 8–10 page conference-style course project report.
 
@@ -101,21 +101,28 @@ Each correction $c_k = y_k - f(x_k)$ captures the model's systematic error on a 
 
 > **Recommended order**: A3 → A5 → A1 → A2 → A4. A3 and A5 have near-zero implementation cost and can be applied directly to the existing attention aggregator; A1/A2 need new classes but minimal code; A4 requires passing the adj matrix into the aggregator.
 
-### Phase 4: Multi-Dataset Validation → Paper §4.2 Table 1 extended (~2h GPU) **[P0]**
+### Phase 4: Multi-Dataset Validation → Paper §4.2 Table 1 extended (~4h GPU) **[P0]**
 
-**Goal**: Validate generalization on other zero-shot datasets. A single dataset is insufficient to support the "pluggable" claim.
+**Goal**: Validate generalization on SZ-DIDI and CD-DIDI. These are the exact datasets for which OpenCity reports **fast adaptation** results (3-epoch prediction head fine-tuning) in their paper — making this a direct, fair comparison:
+
+| | Training budget | Base model | Adaptation type |
+|---|---|---|---|
+| OpenCity fast-adapt (3ep) | 3 epochs fine-tuning | **modified** | dataset-level |
+| **Ours (3ep aggregator)** | 3 epochs aggregator | **frozen** | **per-query** |
+
+> The 3-epoch row in our aggregator ablation (Exp 8b: MAE 4.30 on PEMS07M) is specifically designed for this comparison. Running the same config on SZ-DIDI/CD-DIDI provides the cross-dataset evidence.
 
 | Dataset | Nodes | Interval | Notes |
 |---------|-------|----------|-------|
-| **CHI_TAXI** | 77 | 30min | Small-scale, ~30min to run best config |
-| PEMS_BAY | 325 | 5min | Medium-scale, ~2h |
-
-> Prioritize CHI_TAXI (fewer nodes, fast). If results are positive, that is sufficient. PEMS_BAY as backup.
+| **SZ-DIDI** | TBD | 5min | Ride-hailing demand; OpenCity fast-adapt numbers available for comparison |
+| **CD-DIDI** | TBD | 5min | Ride-hailing demand; largest distribution shift in OpenCity paper |
 
 | ID | Experiment | Paper target |
 |----|-----------|-------------|
-| 4a | CHI_TAXI: zero-shot baseline | Table 1 extended |
-| 4b | CHI_TAXI: best config (best retrieval + attention agg) | Table 1 extended |
+| 4a | SZ-DIDI: zero-shot baseline | Table 1 extended |
+| 4b | SZ-DIDI: 3ep aggregator (same config as Exp 8b) | Table 1 extended — vs OpenCity fast-adapt |
+| 4c | CD-DIDI: zero-shot baseline | Table 1 extended |
+| 4d | CD-DIDI: 3ep aggregator (same config as Exp 8b) | Table 1 extended — vs OpenCity fast-adapt |
 
 ### Phase 5: K Sweep → Paper §4.5 Figure 3 (~4h GPU) **[P1]**
 
@@ -154,7 +161,7 @@ Each correction $c_k = y_k - f(x_k)$ captures the model's systematic error on a 
 
 Three tiers — each tier produces a usable paper version:
 
-### Tier P0: Minimum Viable Paper (~13h GPU)
+### Tier P0: Minimum Viable Paper (~15h GPU)
 
 Fills Table 1 (main results + multi-dataset) + Table 2 (retrieval) + Table 3 (3 aggregators).
 
@@ -162,7 +169,7 @@ Fills Table 1 (main results + multi-dataset) + Table 2 (retrieval) + Table 3 (3 
 |-----|-------|---------|
 | 1 | 1a: Rerun Exp 8 test; 1b: SimpleDemoAggregator train+test | 5h |
 | 2 | 2b: Embedding KNN implement + test; 2c: Enc-KNN + attention | 6h |
-| 3 | 4a-4b: CHI_TAXI zero-shot + best config | 2h |
+| 3 | 4a-4d: SZ-DIDI + CD-DIDI zero-shot + best config | 4h |
 
 ### Tier P1: K Sweep (+4h GPU)
 
@@ -180,7 +187,7 @@ Figures 4-5, qualitative analysis. Mainly post-processing.
 |-----|-------|---------|
 | 5 | 6a-6c: Attention viz, per-hour/per-node analysis | 1h |
 
-**Total: P0=13h, P0+P1=17h, Full=18h** (down from 46h in original plan — 60% savings)
+**Total: P0=15h, P0+P1=19h, Full=20h**
 
 ---
 
@@ -189,13 +196,15 @@ Figures 4-5, qualitative analysis. Mainly post-processing.
 ### P0 — Minimum Viable Paper
 - [x] 1a: Rerun Exp 8 test (10ep) → MAE=4.29, RMSE=7.71, MAPE=11.42%, CORR=0.7483
 - [x] 1a': Retrain attention aggregator (3 epochs) for fair comparison → MAE=4.30, RMSE=7.68, MAPE=11.37%, CORR=0.7482 → Table 1, Table 3
-- [ ] 1b: Train + test SimpleDemoAggregator → Table 3
+- [x] 1b: Train + test SimpleDemoAggregator → MAE=4.47, RMSE=8.01, MAPE=11.55%, CORR=0.7370 → Table 3
 - [ ] 2: Implement `demo_selection='embedding'` in `ict_data_process.py`
 - [ ] 2: Precompute encoder features for demo pool
 - [ ] 2b: Test enc-KNN (node-mean) + naive avg → Table 2
 - [ ] 2c: Test best enc-KNN + attention aggregator → Table 1 "Ours"
-- [ ] 4a: CHI_TAXI zero-shot baseline → Table 1
-- [ ] 4b: CHI_TAXI best config → Table 1
+- [ ] 4a: SZ-DIDI zero-shot baseline → Table 1 extended
+- [ ] 4b: SZ-DIDI best config (best retrieval + attention agg) → Table 1 extended
+- [ ] 4c: CD-DIDI zero-shot baseline → Table 1 extended
+- [ ] 4d: CD-DIDI best config (best retrieval + attention agg) → Table 1 extended
 - [ ] Add inference time measurement (wall-clock per sample) → Table 1 "Time" column
 - [ ] Update `05_experiment_log.md` with all new results
 

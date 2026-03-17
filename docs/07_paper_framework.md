@@ -8,7 +8,7 @@
 
 **Structure**: Problem → Gap → Method → Key Results → Significance
 
-> Pretrained spatio-temporal foundation models (e.g., OpenCity, UniST) achieve strong zero-shot traffic forecasting, but lack the ability to adapt predictions using task-specific demonstrations at test time — a capability known as in-context learning (ICL). Naively extending input sequences to include demonstrations violates the model's fixed-length pretraining assumption, causing severe performance degradation. We propose **ICL-Traffic**, a lightweight, pluggable module that enables in-context adaptation for *any* frozen traffic foundation model through two components: (1) a **residual correction framework** that estimates model bias from demonstration prediction errors, and (2) a **learned aggregation module** (~200K trainable parameters) that attends over demonstration-query feature similarity to produce context-aware corrections. We further improve demonstration quality via **embedding-space retrieval**, replacing raw-input KNN with encoder-feature similarity matching. On PEMS07M, our method reduces MAE from [ZS baseline] to [best result], achieving [X%] improvement with only 0.2% additional parameters relative to the base model. The module requires no gradient flow through the backbone, trains in [Y] minutes from cached features, and transfers across datasets without re-architecture.
+> Pretrained spatio-temporal foundation models (e.g., OpenCity, UniST) achieve strong zero-shot traffic forecasting, but lack the ability to adapt predictions using task-specific demonstrations at test time — a capability known as in-context learning (ICL). Naively extending input sequences to include demonstrations violates the model's fixed-length pretraining assumption, causing severe performance degradation. We propose **ICL-Traffic**, a lightweight, pluggable module that enables in-context adaptation for *any* frozen traffic foundation model through two components: (1) a **residual correction framework** that estimates model bias from demonstration prediction errors, and (2) a **learned aggregation module** (~200K trainable parameters) that attends over demonstration-query feature similarity to produce context-aware corrections. We further improve demonstration quality via **embedding-space retrieval**, replacing raw-input KNN with encoder-feature similarity matching. On PEMS07M, our method reduces MAE from [ZS baseline] to [best result], achieving [X%] improvement with only ~0.8% additional parameters relative to the base model. The module requires no gradient flow through the backbone, trains in [Y] minutes from cached features, and transfers across datasets without re-architecture.
 
 **Experiments needed**: Final best MAE number, training time, parameter ratio.
 
@@ -156,11 +156,11 @@ where $\mathbf{h}$ are encoder features and $\mathbf{c}_k = \mathbf{Y}_k - f_\th
 
 ### 4.1 Experimental Setup (0.5 page)
 
-**Dataset**: PEMS07M — 228 sensor nodes, 5-min interval, highway traffic flow
+**Dataset**: PEMS07M — 228 sensor nodes, 5-min interval, highway traffic speed
 - Split: 50% train / 10% val / 40% test
 - Demo pool: 5,761 sliding windows from training set
 
-**Base Model**: OpenCity-plus (embed_dim=512, enc_depth=6, ~100M params)
+**Base Model**: OpenCity-plus (embed_dim=512, enc_depth=6, ~26M params)
 - Pretrained on multi-city traffic data; PEMS07M is zero-shot (unseen during pretraining)
 
 **Metrics**: MAE, RMSE, MAPE (%), Pearson Correlation
@@ -176,8 +176,9 @@ where $\mathbf{h}$ are encoder features and $\mathbf{c}_k = \mathbf{Y}_k - f_\th
 | Residual + Random | rand | 3 | 6.14 | 9.53 | 14.84 | 0.634 | -36% |
 | Residual + KNN | raw | 3 | 4.66 | 8.11 | 11.92 | 0.729 | -3.6% |
 | Residual + Enc-KNN | emb | 3 | TBD | | | | |
-| **Ours (3ep)** | raw | 3 | **TBD** | | | | |
-| Ours (10ep) | raw | 3 | 4.29 | 7.71 | 11.42 | 0.748 | +4.7% |
+| Ours: Simple Agg (5ep) | raw | 3 | 4.47 | 8.01 | 11.55 | 0.737 | +0.7% |
+| **Ours: Cross-Attn (3ep)** | raw | 3 | **4.30** | **7.68** | **11.37** | **0.748** | **+4.4%** |
+| Ours: Cross-Attn (10ep) | raw | 3 | 4.29 | 7.71 | 11.42 | 0.748 | +4.7% |
 
 **Narrative**: (1) Random demo selection hurts — confirms that demo *quality* matters. (2) KNN retrieval nearly recovers zero-shot. (3) Embedding retrieval + learned aggregation outperforms zero-shot, achieving ICL benefit.
 
@@ -200,11 +201,11 @@ All with naive averaging, K=3. Shows that semantic similarity in embedding space
 
 | Aggregator | Trainable Params | MAE | RMSE | MAPE% |
 |-----------|-----------------|-----|------|-------|
-| Naive average | 0 | TBD | TBD | TBD |
-| Cosine similarity | 8K | TBD | TBD | TBD |
+| Naive average | 0 | 4.66 | 8.11 | 11.92 |
+| Cosine similarity (5ep) | 8K | 4.47 | 8.01 | 11.55 |
 | MLP | 70K | TBD | TBD | TBD |
 | Gated | 130K | TBD | TBD | TBD |
-| **Cross-attention (3ep)** | **198K** | **TBD** | | |
+| **Cross-attention (3ep)** | **198K** | **4.30** | **7.68** | **11.37** |
 | Cross-attention (10ep) | 198K | 4.29 | 7.71 | 11.42 |
 
 All with best retrieval, K=3. Shows that learned aggregation meaningfully improves over naive averaging, and cross-attention captures richer query-demo interactions than simpler alternatives.
@@ -268,7 +269,7 @@ Histogram of $\|\hat{\mathbf{C}}\|$ for naive avg vs learned aggregator.
 
 ## 6. Conclusion (0.25 page)
 
-> We presented ICL-Traffic, a lightweight in-context learning module for pretrained traffic foundation models. By framing ICL as residual correction with learned aggregation, our approach enables test-time adaptation using historical demonstrations without modifying the frozen backbone. The module adds only ~200K parameters (<0.2% of the base model), trains in minutes from cached features, and consistently improves over zero-shot inference. Our systematic ablations reveal that demo retrieval quality and aggregation design are both critical, with embedding-space retrieval and cross-attention aggregation achieving the best results. ICL-Traffic is model-agnostic and can plug into any ST foundation model, opening a practical path toward adaptive traffic forecasting.
+> We presented ICL-Traffic, a lightweight in-context learning module for pretrained traffic foundation models. By framing ICL as residual correction with learned aggregation, our approach enables test-time adaptation using historical demonstrations without modifying the frozen backbone. The module adds only ~200K parameters (~0.8% of the base model), trains in seconds from cached features, and consistently improves over zero-shot inference. Our systematic ablations reveal that demo retrieval quality and aggregation design are both critical, with embedding-space retrieval and cross-attention aggregation achieving the best results. ICL-Traffic is model-agnostic and can plug into any ST foundation model, opening a practical path toward adaptive traffic forecasting.
 
 ---
 
