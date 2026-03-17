@@ -60,11 +60,6 @@ Left: standard zero-shot inference. Right: ICL-Traffic pipeline (query → froze
 - **TimesFM-ICF** [das2024icf] (core reference — application reference): first to enable ICL for time-series FMs; adds separator tokens + cross-example attention + removes positional encoding; achieves 7-25% improvement over base FM, surpassing per-dataset fine-tuning on some benchmarks. Core insight: related examples at inference time help adapt to target distributions.
 - **Gap**: ICL has been established in NLP (ICT) and time-series (TimesFM-ICF) but remains entirely unexplored for ST foundation models with graph structure.
 
-### 2.3 Test-Time Adaptation
-- TTT [sun2020ttt], TENT [wang2021tent] adapt models at test time via self-supervised objectives or entropy minimization; recent work extends to time-series (COSA, TAFAS) [brief, 2 sentences]
-- Positioning note: fine-tuning (OpenCity fast-adapt) and our method both use target-domain training data — the difference is utilization: fine-tuning absorbs data into model weights; our method preserves data as a retrievable demo pool
-- Key distinction from TTA: TTA requires test-time gradient updates; our aggregator is trained once offline and applied at inference with no gradient updates; our method is complementary to both fine-tuning and TTA
-
 **Experiments needed**: None (literature review).
 
 ---
@@ -257,7 +252,7 @@ Histogram of $\|\hat{\mathbf{C}}\|$ for naive avg vs learned aggregator.
 3. **Retrieval quality ceiling**: Embedding-space KNN improves over raw KNN, but the frozen encoder was not designed for retrieval. A learned retrieval metric could further improve.
 
 ### Connection to Related Paradigms
-- **Test-time training (TTT)**: updates model params; ours freezes backbone, complementary
+- **TTA (TTT, TENT, COSA, TAFAS)**: TTA requires test-time gradient updates using self-supervised signals; our aggregator is trained once offline and applied at inference with no gradient updates — distinct paradigms, complementary in principle
 - **kNN regression**: our method can be viewed as kNN in correction space rather than prediction space
 - **Prompt tuning**: soft prompts modify input representation; our corrections modify output. Future work: bridge these.
 

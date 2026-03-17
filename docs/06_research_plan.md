@@ -148,7 +148,7 @@ Each correction $c_k = y_k - f(x_k)$ captures the model's systematic error on a 
 |---------|-------|---------|
 | **Abstract** | 0.25 | Problem+Gap (ST FM distribution shift + ICL unexplored) → Challenge (9-28% from seq extension) → Method (residual correction + KNN + aggregator) → Key Result (MAE 4.50→4.29, +4.7%, 198K params) |
 | **1. Introduction** | 1.0 | Para1: OpenCity + ICL gap; Para2: ICT [chen2022ict] + TimesFM-ICF [das2024icf] as ICL precedents; Para3: challenge (9-28% seq ext) + output-space insight; Para4: contributions (first ICL for ST FMs) |
-| **2. Related Work** | 1.0 | 2.1 ST FMs (OpenCity detailed, others brief); 2.2 ICL (ICT + TimesFM-ICF as core refs); 2.3 TTA (paradigm comparison: fine-tuning/TTA/ours) |
+| **2. Related Work** | 0.75 | 2.1 ST FMs (OpenCity detailed, others brief); 2.2 ICL (ICT + TimesFM-ICF as core refs); TTA distinction moved to Discussion |
 | **3. Method** | 2.5 | 3.1 Problem formulation; 3.2 Residual correction; 3.3 Demo retrieval strategies; 3.4 Learned aggregation architectures; 3.5 Training procedure |
 | **4. Experiments** | 3.0 | 4.1 Setup; 4.2 Main results; 4.3 Retrieval ablation; 4.4 Aggregator ablation; 4.5 K sweep; 4.6 Analysis |
 | **5. Discussion** | 0.5 | Limitations; compute cost; relation to true ICL |

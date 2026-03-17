@@ -86,22 +86,6 @@
   - Achieves 7-25% improvement over base FM; even surpasses per-dataset fine-tuning on Monash benchmark
   - **Connection to our work**: We share the goal of leveraging related examples for inference-time adaptation. However, TimesFM-ICF requires architectural modification and continued pretraining. We pursue a complementary approach: keep the ST model completely frozen and achieve adaptation through output-space residual correction.
 
-### 2.3 Test-Time Adaptation
-
-- **Brief background**: TTA methods (TTT [sun2020ttt], TENT [wang2021tent]) adapt models at test time by updating parameters using self-supervised objectives or entropy minimization. Recent work extends TTA to time-series forecasting (COSA, TAFAS, etc.). [2-3 sentences]
-- **Positioning across adaptation paradigms** [concise]:
-
-  | Paradigm | Training data | Base model | Per-query variation at inference |
-  |----------|--------------|------------|-------------------------------|
-  | Fine-tuning (OpenCity fast-adapt) | Target-domain train set | Modified | No (same model for all queries) |
-  | TTA (TTT, TENT) | Test batch statistics | Modified at test time | Per-batch |
-  | **Ours** | Target-domain train set (as demo pool) | **Frozen** | **Yes (query-specific demo retrieval)** |
-
-  > Note: Fine-tuning and our method use the same target-domain training data; the difference is utilization — absorbed into weights vs. preserved as a retrievable demo pool.
-
-  - TTA requires a self-supervised signal or statistics at test time; our method uses pre-computed training demonstrations, requiring no test-time gradient
-  - Our method is complementary to both fine-tuning and TTA — the aggregator's per-query correction could be applied on top of a fine-tuned or TTA-adapted model
-
 ---
 
 ## Section III: Method
@@ -246,6 +230,7 @@ All with KNN, K=3. **Takeaway**: Learned aggregation improves over averaging; cr
 - **Analysis**: per-hour MAE curves, attention weight visualization, per-node improvement map
 
 ### Broader Connections
+- **Relation to TTA**: Our method is also distinct from test-time adaptation (TTT [sun2020ttt], TENT [wang2021tent], COSA, TAFAS): TTA requires test-time gradient updates using self-supervised signals, whereas our aggregator is trained once offline and applied at inference with no gradient updates anywhere.
 - **ICL progression**: ICT [chen2022ict] trains models to perform ICL via a meta-learning objective → TimesFM-ICF [das2024icf] extends ICL to time-series via continued pretraining → our work shows ICL-like demonstration-based adaptation is achievable for frozen ST models via output-space correction, without any model modification
 - **Comparison with fine-tuning**: Both fine-tuning and our method use the same target-domain training data. The difference is utilization: fine-tuning absorbs all training examples into model weights (global adaptation); our method preserves them as a retrievable pool and lets each query dynamically select its most relevant subset. This query-specific demo retrieval is the source of per-query variation. We provide a direct experimental comparison with OpenCity's fast adaptation on SZ-DIDI and CD-DIDI under the same 3-epoch budget (planned).
 - **Why per-query retrieval helps** (analysis point): Fine-tuning aggregates gradient signals from all training examples equally into weight updates. Our method allows training examples highly similar to a specific test query to exert disproportionate influence on that query's prediction — through KNN retrieval and learned aggregation. This may be particularly beneficial under distribution shifts where the demo pool contains local structure that a global weight update would dilute.
