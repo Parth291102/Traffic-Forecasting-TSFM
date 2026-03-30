@@ -84,7 +84,7 @@ class Trainer(object):
         self.model.train()
         total_loss = 0
         step = 0
-        for inputs, targets in self.train_dataloader:
+        for inputs, targets in tqdm(self.train_dataloader, desc='  Train', leave=False):
             inputs, targets = inputs.squeeze(0).to(self.args.device), targets.squeeze(0).to(self.args.device)
             select_dataset = get_key_from_value(self.num_nodes_dict, inputs.shape[2])
             out = self.model(inputs, targets, select_dataset, batch_seen=None)
@@ -119,7 +119,7 @@ class Trainer(object):
         self.model.eval()
         total_val_loss = 0
         with torch.no_grad():
-            for inputs, targets in self.val_dataloader:
+            for inputs, targets in tqdm(self.val_dataloader, desc='  Val', leave=False):
                 inputs, targets = inputs.squeeze(0).to(self.args.device), targets.squeeze(0).to(self.args.device)
                 select_dataset = get_key_from_value(self.num_nodes_dict, inputs.shape[2])
                 out = self.model(inputs, targets, select_dataset, batch_seen=None)
