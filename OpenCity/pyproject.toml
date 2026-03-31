@@ -10,6 +10,7 @@ dependencies = [
     "numpy>=1.26.4,<2",
     "pandas>=2.3.3",
     "scipy>=1.13.1",
+    "tables>=3.9.2",
     "torch==2.4.1",
     "torchaudio==2.4.1",
     "torchvision==0.19.1",

@@ -194,8 +194,8 @@ elif args.mode == 'ict':
     # (each forward is the same size as zero-shot, no VRAM increase)
     print_model_parameters(model, only_num=False)
 
-    # Create ICT dataloaders
-    _, _, test_dataloader_ict, scaler_dict_ict = define_ict_dataloader(args)
+    # Create ICT dataloaders with encoder-feature KNN
+    _, _, test_dataloader_ict, scaler_dict_ict = define_ict_dataloader(args, model=model)
 
     # Run ICT test
     trainer.test_ict(
@@ -215,8 +215,8 @@ elif args.mode == 'ict_train_aggregator':
         model.load_state_dict(model_weights)
     print("Loaded pretrained model for aggregator training")
 
-    # Create ICT dataloaders (train + val + test)
-    train_dl_ict, val_dl_ict, test_dl_ict, scaler_dict_ict = define_ict_dataloader(args)
+    # Create ICT dataloaders with encoder-feature KNN (train + val + test)
+    train_dl_ict, val_dl_ict, test_dl_ict, scaler_dict_ict = define_ict_dataloader(args, model=model)
 
     # Create trainer with ICT dataloaders
     trainer_ict = Trainer(model, loss, optimizer, train_dl_ict, val_dl_ict,
