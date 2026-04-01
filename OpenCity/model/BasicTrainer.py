@@ -364,8 +364,10 @@ class Trainer(object):
         self.logger.info('[Aggregator] Phase 1: pre-computing base model outputs into RAM ...')
         train_cache = self._precompute_inmemory(self.train_dataloader, desc='Train cache')
         val_cache = None
-        if self.val_dataloader is not None:
+        if self.val_dataloader is not None and args.early_stop:
             val_cache = self._precompute_inmemory(self.val_dataloader, desc='Val cache')
+        elif self.val_dataloader is not None:
+            self.logger.info('[Aggregator] Skipping val cache (early_stop=False)')
         self.logger.info('[Aggregator] Phase 1 complete. Starting Phase 2 (aggregator training) ...')
 
         # 6. Training loop from cached data

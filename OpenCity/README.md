@@ -492,7 +492,7 @@ cd /path/to/OpenCity/model
 uv run python Run.py -mode ict_train_aggregator -model OpenCity \
   -load_pretrain_path OpenCity-plus.pth -batch_size 64 \
   -num_demonstrations 3 -demo_selection similar \
-  -aggregator_type attention -aggregator_epochs 5 -aggregator_lr 1e-4 \
+  -aggregator_type attention -aggregator_epochs 3 -aggregator_lr 1e-4 \
   -early_stop True -early_stop_patience 3 \
   -use_cpu True \
   -log_step 1 \
@@ -525,6 +525,8 @@ uv run python Run.py -mode ict -model OpenCity \
 > **What `ict_train_aggregator` does**: Loads pretrained weights → freezes all base model parameters → initializes a `DemoAggregator` → trains aggregator online (each batch: base model forward passes + aggregator gradient step) → saves checkpoint after every batch (`aggregator_ckpt.pth`) for resume support → runs validation at end of each epoch with early stopping → saves `aggregator_best.pth` → runs `test_ict` with `ict_mode='learned'`.
 >
 > **Resume support**: If training is interrupted (e.g., server shutdown), re-run the exact same command. The trainer auto-detects `aggregator_ckpt.pth` and resumes from the last completed batch, preserving optimizer state, epoch position, and best validation loss.
+>
+> **Skipping validation**: Pass `-early_stop False` to skip validation cache pre-computation and run all training epochs without early stopping. This is useful for large datasets (e.g., SZ_DIDI with 627 nodes) where Phase 1 pre-computation is expensive and time-constrained — skipping the val cache saves ~1.5 hours on DIDI-scale datasets. The aggregator weights from the last epoch are saved directly as `aggregator_best.pth`.
 
 The `DemoAggregator` module is defined in `model/OpenCity/DemoAggregator.py` and provides two variants:
 - **`SimpleDemoAggregator`**: cosine similarity between projected query and demo encoder features → per-node softmax weights → weighted correction sum. ~8K params.
