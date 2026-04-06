@@ -232,24 +232,81 @@ Standard OpenCity-plus zero-shot inference on DIDI datasets, batch_size=16, fp32
 - SZ_DIDI zero-shot MAE 4.66 vs paper-reported 3.68 — gap likely due to evaluation horizon differences or checkpoint version
 - These baselines set the stage for ICT experiments on DIDI to measure cross-dataset adaptation improvement
 
-### Experiment 11: Eval (Fine-tune Prediction Head, 3 epochs) on DIDI Datasets
+### Experiment 11/12: Adaptation on DIDI Datasets
 
-Fine-tune only `predictor.linear` for 3 epochs (paper's fast-adaptation protocol). All other parameters frozen. batch_size=16, lr=0.001, early_stop_patience=15.
+Three adaptation methods compared: (a) **Zero-shot** (Exp 10); (b) **Fine-tune** prediction head for 3 epochs, lr=0.001 (paper's fast-adaptation protocol, all other params frozen); (c) **ICT Aggregator** — DemoAggregator (cross-attention, ~198K params, 4 heads, proj_dim=128), 3 epochs, lr=1e-4, K=3, KNN demo selection, base model frozen.
 
-| Dataset | MAE | RMSE | MAPE | CORR | vs Zero-Shot |
-|---------|-----|------|------|------|--------------|
-| SZ_DIDI | **2.33** | **3.75** | **9.89%** | **0.6811** | **+50.0%** |
-| SZ_DIDI (Paper) | 2.36 | 3.55 | — | — | — |
-| CD_DIDI | **2.60** | **3.93** | **11.98%** | **0.7929** | **+59.0%** |
-| CD_DIDI (Paper) | 2.97 | 4.29 | — | — | — |
+| Dataset | Method | MAE | RMSE | MAPE | CORR | vs ZS |
+|---------|--------|-----|------|------|------|-------|
+| SZ_DIDI | Zero-Shot (Exp 10) | 4.66 | 7.10 | 19.05% | 0.3222 | — |
+| SZ_DIDI | Fine-tune pred head (Exp 11) | **2.33** | **3.75** | **9.89%** | **0.6811** | +50.0% |
+| SZ_DIDI | ICT Aggregator (Exp 12) | **2.70** | **4.11** | **11.08%** | **0.5402** | +42.1% |
+| SZ_DIDI | Paper (zero-shot) | 3.68 | 5.58 | — | — | — |
+| SZ_DIDI | Paper (fine-tune) | 2.36 | 3.55 | — | — | — |
+| CD_DIDI | Zero-Shot (Exp 10) | 6.34 | 9.36 | 28.36% | 0.3361 | — |
+| CD_DIDI | Fine-tune pred head (Exp 11) | **2.60** | **3.93** | **11.98%** | **0.7929** | +59.0% |
+| CD_DIDI | ICT Aggregator (Exp 12) | **3.41** | **5.02** | **15.28%** | **0.7195** | +46.2% |
+| CD_DIDI | Paper (zero-shot) | 6.03 | 9.50 | — | — | — |
+| CD_DIDI | Paper (fine-tune) | 2.97 | 4.29 | — | — | — |
 
-**SZ_DIDI observations**:
-- Dramatic improvement: MAE 4.66 → 2.33 (50% reduction), CORR 0.32 → 0.68
-- Paper reports SZ_DIDI eval: MAE 2.36, RMSE 3.55 — our MAE 2.33 is very close (within 1.3%)
-- Confirms that the zero-shot gap (4.66 vs paper's 3.68) was due to evaluation differences, not model issues
-- Fine-tuning the prediction head alone is highly effective for domain adaptation
+**Analysis**:
 
-**CD_DIDI observations**:
-- Strong improvement: MAE 6.34 → 2.60 (59% reduction), CORR 0.34 → 0.79
-- Paper reports CD_DIDI eval: MAE 2.97, RMSE 4.29 — our MAE 2.60 outperforms paper (12.5% better)
-- Both DIDI datasets confirm eval mode works correctly and matches/exceeds paper results
+#### 1. ICT improvement scales with distribution shift
+
+| Dataset | Type | ZS MAE | ICT MAE | MAE Reduction | vs ZS |
+|---------|------|--------|---------|---------------|-------|
+| PEMS07M | In-distribution | 4.50 | 4.30 | 0.20 | +4.4% |
+| SZ_DIDI | Out-of-distribution | 4.66 | 2.70 | 1.96 | +42.1% |
+| CD_DIDI | Out-of-distribution | 6.34 | 3.41 | 2.93 | +46.2% |
+
+The magnitude of ICT improvement is positively correlated with the degree of distribution shift. On in-distribution data (PEMS07M), the model's zero-shot predictions are already well-calibrated — residual errors are small and stochastic, leaving limited systematic correction signal for the aggregator to learn (+4.4%). On out-of-distribution data, the model exhibits large systematic biases (unseen cities, different temporal resolution), and KNN demos expose these systematic errors, allowing the learned aggregator to effectively weight and apply corrections (+42–46%).
+
+**Takeaway**: The core value of ICT lies in out-of-distribution adaptation, not in-distribution accuracy improvement.
+
+#### 2. ICT recovers majority of fine-tuning gains
+
+| Dataset | Metric | ZS | ICT | FT | ICT Recovery Rate |
+|---------|--------|-----|-----|-----|-------------------|
+| SZ_DIDI | MAE | 4.66 | 2.70 | 2.33 | 84.1% |
+| SZ_DIDI | CORR | 0.3222 | 0.5402 | 0.6811 | 60.7% |
+| CD_DIDI | MAE | 6.34 | 3.41 | 2.60 | 78.3% |
+| CD_DIDI | CORR | 0.3361 | 0.7195 | 0.7929 | 83.9% |
+
+Recovery Rate = (ZS − ICT) / (ZS − FT), i.e., the percentage of total fine-tuning gain recovered by ICT.
+
+- **MAE recovery**: ICT recovers 78–84% of fine-tuning's MAE gain through output-space correction alone (without modifying model weights)
+- **CORR recovery**: On SZ_DIDI, CORR recovery is lower (61%), indicating that while ICT reduces absolute error effectively, it is less capable of capturing spatio-temporal correlation patterns compared to representation adaptation. On CD_DIDI, CORR recovery is higher (84%), possibly because the zero-shot correlation baseline is slightly higher (0.34 vs 0.32), giving the aggregator more structure to exploit
+- **Remaining gap**: SZ 0.37 MAE gap, CD 0.81 MAE gap — this quantifies the capability boundary between output-space correction and representation adaptation
+
+**Takeaway**: Without modifying any model weights, ICT recovers ~80% of fine-tuning's MAE gain. The remaining ~20% stems from fine-tuning's representation adaptation of the prediction head, which is fundamentally unreachable by output-space correction.
+
+#### 3. Output-space correction vs representation adaptation
+
+Fine-tuning modifies the prediction head weights, enabling the model to learn a mapping from encoder features to the new distribution's output space. ICT keeps the model entirely unchanged and applies post-hoc correction in output space only. The gap between the two reveals a clear hierarchy:
+
+```
+Zero-Shot  →  ICT (output correction)  →  Fine-tune (representation adaptation)
+  MAE↓            ~80% recovery               100% recovery
+  No weight mod    No weight mod               Modifies prediction head
+  1 forward pass   K+1 forward passes          1 forward pass
+```
+
+ICT advantages: (a) Preserves pretrained weights entirely, maintaining model generality; (b) No gradient backpropagation to base model; (c) Aggregator training is extremely fast (~5s from cached features).
+ICT disadvantages: (a) Inference cost scales as K+1×; (b) Requires maintaining a demo database; (c) Cannot reach fine-tuning's accuracy ceiling.
+
+#### 4. Practical implications
+
+- **Target scenario**: ICT is best suited for rapid adaptation to new cities/datasets where modifying the pretrained model is not permitted (e.g., model-as-a-service with multi-tenant shared weights)
+- **Complementary to fine-tuning**: When weight modification is allowed, fine-tuning remains the preferred approach; ICT can serve as a quick baseline before fine-tuning or as an alternative in non-trainable deployment settings
+- **Aggregator training cost is negligible**: 3 epochs from cached features takes only ~5s; the main bottleneck lies in precomputing the cache (~8h at DIDI scale) and K+1 forward passes at inference time
+
+#### 5. Comparison with paper results
+
+| Dataset | Our FT | Paper FT | Our ZS | Paper ZS |
+|---------|--------|----------|--------|----------|
+| SZ_DIDI | **2.33** | 2.36 | 4.66 | 3.68 |
+| CD_DIDI | **2.60** | 2.97 | 6.34 | 6.03 |
+
+- Our fine-tuning slightly outperforms the paper on both datasets (SZ: 2.33 vs 2.36; CD: 2.60 vs 2.97)
+- Our zero-shot is worse than the paper (SZ: 4.66 vs 3.68; CD: 6.34 vs 6.03) — likely due to differences in evaluation horizon or checkpoint version
+- The larger zero-shot gap combined with better fine-tuning results suggests our adaptation protocol (3 epochs, lr=0.001) may be more effective than the paper's
