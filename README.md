@@ -1,43 +1,62 @@
-# OpenCity: Open Spatio-Temporal Foundation Models for Traffic Prediction
+# 🚦 ICL-Traffic: In-Context Learning for Spatio-Temporal Forecasting
 
-<img src='opencity.png' />
+ICL-Traffic is a lightweight framework that enables **in-context learning (ICL)** for pretrained **spatio-temporal foundation models (ST-FMs)** without any fine-tuning or gradient updates.
 
-A pytorch implementation for the paper: [OpenCity: Open Spatio-Temporal Foundation Models for Traffic Prediction](https://arxiv.org/abs/2408.10269)<br />  
+Pretrained models like OpenCity perform well in zero-shot settings but degrade under **distribution shifts** (e.g., new cities or modalities).  
+ICL-Traffic addresses this by **retrieving similar examples and correcting predictions in output space**, keeping the backbone completely frozen.
 
-[Zhonghang Li](https://scholar.google.com/citations?user=__9uvQkAAAAJ), [Long Xia](https://scholar.google.com/citations?user=NRwerBAAAAAJ), [Lei Shi](https://harryshil.github.io/), [Yong Xu](https://scholar.google.com/citations?user=1hx5iwEAAAAJ), [Dawei Yin](https://www.yindawei.com/), [Chao Huang](https://sites.google.com/view/chaoh)* (*Correspondence)<br />  
+---
 
-This repository hosts the code, data, and model weights of **OpenCity**.
+## 💡 Method Overview
 
------
+### 🔷 Block Diagram (Pipeline)
+
+<img width="648" height="130" alt="image" src="https://github.com/user-attachments/assets/54b33a17-871d-4416-a917-8e49a48e1ea8" />
+
+---
+
+## ⚙️ Key Components
+
+- **Frozen Backbone** → No parameter updates  
+- **KNN Retrieval** → Finds similar traffic patterns  
+- **Residual Correction** → Captures systematic model error  
+- **Cross-Attention Aggregator** → Learns how to combine corrections  
+
+---
+
+## 📊 Final Results
+
+### 🟢 In-Distribution (PEMS07M)
+
+<img width="766" height="212" alt="image" src="https://github.com/user-attachments/assets/2758cb4d-a1eb-4f01-8a64-c9a6c92a74dc" />
 
 
-🎯🎯📢📢 We upload the **models** and **data** used in our OpenCity on 🤗 **Huggingface**. We highly recommend referring to the table below for further details: 
+---
 
-| 🤗 Huggingface Address                                        | 🎯 Description                                                |
-| ------------------------------------------------------------ | ------------------------------------------------------------ |
-| [https://huggingface.co/hkuds/OpenCity-Plus](https://huggingface.co/hkuds/OpenCity-Plus/tree/main) | It's the model weights of our OpenCity-Plus. |
-| [https://huggingface.co/datasets/hkuds/OpenCity-dataset/tree/main](https://huggingface.co/datasets/hkuds/OpenCity-dataset/tree/main) | We released the datasets used in OpenCity. |
+### 🔴 Cross-Dataset (Out-of-Distribution)
 
+<img width="766" height="230" alt="image" src="https://github.com/user-attachments/assets/42e2ee19-9378-4105-8043-4709412ea990" />
 
+---
 
------------
+## 🧠 Key Insight
 
-## Introduction
+> Retrieval finds relevant examples, and aggregation selects useful corrections — enabling strong adaptation without modifying the model.
 
-<p style="text-align: justify">
-In this work, we aim to unlock new possibilities for building versatile, resilient and adaptive spatio-temporal foundation models for traffic prediction. 
-To achieve this goal, we introduce a novel foundation model, named OpenCity, that can effectively capture and normalize the underlying spatio-temporal patterns from diverse data characteristics, facilitating zero-shot generalization across diverse urban environments. 
-OpenCity integrates the Transformer architecture with graph neural networks to model the complex spatio-temporal dependencies in traffic data. 
-By pre-training OpenCity on large-scale, heterogeneous traffic datasets, we enable the model to learn rich, generalizable representations that can be seamlessly applied to a wide range of traffic forecasting scenarios. 
-Experimental results demonstrate that OpenCity exhibits exceptional zero-shot predictive performance in various traffic prediction tasks.
-</p>
+---
 
-![The detailed framework of the proposed OpenCity.](https://github.com/OpenCity-ST/OpenCity-ST.github.io/blob/main/images/framework.png)
+## 🚀 Highlights
 
-## Main Results
-**Outstanding Zero-shot Prediction Performance.** OpenCity achieves significant zero-shot learning breakthroughs, outperforming most baselines even without fine-tuning. This highlights the approach's robustness and effectiveness at learning complex spatio-temporal patterns in large-scale traffic data, extracting universal insights applicable across downstream tasks.
- 
-![Zero-shot vs. Full-shot.](https://github.com/OpenCity-ST/OpenCity-ST.github.io/blob/main/images/zero-shot.png)
+- ✅ No fine-tuning or gradients at test time  
+- ✅ Fully frozen backbone  
+- ✅ Only ~0.8% extra parameters  
+- ✅ Recovers **~78–84% of fine-tuning gains**  
+
+---
+
+## 📄 References
+
+- See [Final Project Report](CSC722_Final%20Project%20Report_Group2.pdf) and implementation details in the project repository.
 
 
 ### 1. Code Structure <a href='#all_catelogue'>[Back to Top]</a>
