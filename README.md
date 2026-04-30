@@ -9,7 +9,7 @@ ICL-Traffic addresses this by **retrieving similar examples and correcting predi
 
 ## 💡 Method Overview
 
-### 🔷 Block Diagram (Pipeline)
+### 🔷 Pipeline (Block Diagram) 
 
 <img width="648" height="130" alt="image" src="https://github.com/user-attachments/assets/54b33a17-871d-4416-a917-8e49a48e1ea8" />
 
