@@ -59,99 +59,9 @@ ICL-Traffic addresses this by **retrieving similar examples and correcting predi
 - See [Final Project Report](CSC722_Final%20Project%20Report_Group2.pdf) and implementation details in the project repository.
 
 
-### 1. Code Structure <a href='#all_catelogue'>[Back to Top]</a>
-
-```
-├── conf/
-│   ├── AGCRN/
-│   │   └── AGCRN.conf
-│   ├── ASTGCN/
-│   │   └── ASTGCN.conf
-│   ├── general_conf/
-│   │   ├── dataset_splits.conf
-│   │   ├── global_baselines.conf
-│   │   └── pretrain.conf
-│   ├── GWN/
-│   │   └── GWN.conf
-│   ├── MSDR/
-│   │   └── MSDR.conf
-│   ├── MTGNN/
-│   │   └── MTGNN.conf
-│   ├── OpenCity/
-│   │   └── OpenCity.conf
-│   ├── PDFormer/
-│   │   └── PDFormer.conf
-│   ├── STGCN/
-│   │   └── STGCN.conf
-│   ├── STSGCN/
-│   │   └── STSGCN.conf
-│   ├── STWA/
-│   │   └── STWA.conf
-│   └── TGCN/
-│       └── TGCN.conf
-├── data/
-│   ├── generate_ca_data.py
-│   └── README.md
-├── lib/
-│   ├── data_process.py
-│   ├── ict_data_process.py
-│   ├── logger.py
-│   ├── metrics.py
-│   ├── Params_predictor.py
-│   ├── Params_pretrain.py
-│   ├── predifineGraph.py
-│   └── TrainInits.py
-├── model/
-│   ├── AGCRN/
-│   │   ├── AGCN.py
-│   │   ├── AGCRN.py
-│   │   ├── AGCRNCell.py
-│   │   └── args.py
-│   ├── ASTGCN/
-│   │   ├── args.py
-│   │   └── ASTGCN.py
-│   ├── GWN/
-│   │   ├── args.py
-│   │   └── GWN.py
-│   ├── MSDR/
-│   │   ├── args.py
-│   │   ├── gmsdr_cell.py
-│   │   └── gmsdr_model.py
-│   ├── MTGNN/
-│   │   ├── args.py
-│   │   └── MTGNN.py
-│   ├── OpenCity/
-│   │   ├── args.py
-│   │   ├── DemoAggregator.py
-│   │   └── OpenCity.py
-│   ├── PDFormer/
-│   │   ├── args.py
-│   │   └── PDFormer.py
-│   ├── ST_WA/
-│   │   ├── args.py
-│   │   ├── attention.py
-│   │   └── ST_WA.py
-│   ├── STGCN/
-│   │   ├── args.py
-│   │   └── stgcn.py
-│   ├── STSGCN/
-│   │   ├── args.py
-│   │   └── STSGCN.py
-│   └── TGCN/
-│       ├── args.py
-│       └── TGCN.py
-│   ├── Model.py
-│   ├── BasicTrainer.py
-│   ├── Run.py
-└── model_weights/
-    ├── OpenCity/
-    └── README.md
-```
-
-
 <span id='Environment'/>
 
-### 2.Environment <a href='#all_catelogue'>[Back to Top]</a>
+### 1.Environment <a href='#all_catelogue'>[Back to Top]</a>
 
 We use [uv](https://docs.astral.sh/uv/) to manage the Python environment and dependencies. All dependencies (including PyTorch with CUDA 12.4) are declared in `pyproject.toml`.
 
@@ -267,17 +177,17 @@ pip install -r requirements.txt
 
 <span id='Training OpenCity'/>
 
-### 3. Training OpenCity <a href='#all_catelogue'>[Back to Top]</a>
+### 2. Training OpenCity <a href='#all_catelogue'>[Back to Top]</a>
 
 <span id='Preparing Pre-trained Data'/>
 
-#### 3.1. Preparing Pre-trained Data <a href='#all_catelogue'>[Back to Top]</a>
+#### 2.1. Preparing Pre-trained Data <a href='#all_catelogue'>[Back to Top]</a>
 
 All datasets are hosted on [Hugging Face](https://huggingface.co/datasets/hkuds/OpenCity-dataset/tree/main). Follow **Steps 5–6** in the [Quick Start](#Environment) above to download all files and generate the California highway subsets.
 
 <span id='Pre-training'/>
 
-#### 3.2. Pre-training <a href='#all_catelogue'>[Back to Top]</a>
+#### 2.2. Pre-training <a href='#all_catelogue'>[Back to Top]</a>
 
 * To pretrain the OpenCity model with different configurations, execute `Run.py` from inside the `OpenCity/model/` directory:
 
@@ -304,7 +214,7 @@ uv run python Run.py -mode pretrain -model OpenCity \
 
 <span id='Evaluating'/>
 
-### 4. Evaluating <a href='#all_catelogue'>[Back to Top]</a>
+### 3. Evaluating <a href='#all_catelogue'>[Back to Top]</a>
 
 * **Model Weights**: The pretrained model weights (`OpenCity-plus.pth`, `OpenCity-base.pth`, `OpenCity-mini.pth`) are stored directly in the repository under `model_weights/OpenCity/`. No additional download is needed after cloning.
   * If the weights are missing or you need to re-download them, use these Hugging Face links: [OpenCity-Plus](https://huggingface.co/hkuds/OpenCity-Plus/tree/main), [OpenCity-Base](https://huggingface.co/hkuds/OpenCity-Base/tree/main), [OpenCity-Mini](https://huggingface.co/hkuds/OpenCity-Mini/tree/main)
@@ -354,7 +264,7 @@ dataset_use = ['PEMS07M']
 | TrafficHZ/ZZ/CD/JN | 672/676/728/576 | 30 min | Traffic Index |
 | TrafficSH | 896 | 30 min | Traffic Index |
 
-#### 4.1 Zero-shot Evaluation (`test` mode)
+#### 3.1 Zero-shot Evaluation (`test` mode)
 
 Directly evaluate a pretrained model on a dataset **without any training**. This is used for both in-pretrain datasets (supervised evaluation) and out-of-pretrain datasets (zero-shot evaluation).
 
@@ -383,7 +293,7 @@ uv run python Run.py -mode test -model OpenCity \
   --embed_dim 128 --skip_dim 128 --enc_depth 3
 ```
 
-#### 4.2 Fast Adaptation / Efficient Fine-tuning (`eval` mode)
+#### 3.2 Fast Adaptation / Efficient Fine-tuning (`eval` mode)
 
 Load a pretrained model, **freeze all backbone parameters**, and only fine-tune the **prediction head** (the last linear layer) for a few epochs. This is used for fast adaptation to unseen data categories (e.g., CD_DIDI, SZ_DIDI which are traffic index data not seen during pretraining).
 
@@ -409,7 +319,7 @@ uv run python Run.py -mode eval -model OpenCity \
 
 > **What `eval` mode does**: Loads pretrained weights → freezes all parameters → unfreezes only `model.predictor.linear` (the prediction head) → trains for the specified number of epochs with early stopping.
 
-#### 4.3 Supervised Training from Scratch (`ori` mode)
+#### 3.3 Supervised Training from Scratch (`ori` mode)
 
 Train a model from scratch on a single dataset with full train/val/test split and early stopping. Used for baseline comparisons.
 
@@ -432,7 +342,7 @@ uv run python Run.py -mode ori -model OpenCity \
   -batch_size 8 --embed_dim 256 --skip_dim 256 --enc_depth 3
 ```
 
-#### 4.4 In-Context Traffic Forecasting (`ict` mode)
+#### 3.4 In-Context Traffic Forecasting (`ict` mode)
 
 Run zero-shot inference using **In-Context Traffic** (ICT): a pretrained model is loaded with all parameters frozen, and a set of demonstration (prefix) traffic sequences is prepended to the query to guide prediction — no gradient updates occur.
 
@@ -480,7 +390,7 @@ uv run python Run.py -mode ict -model OpenCity \
 
 > **What `ict` mode does**: Loads pretrained weights → freezes all parameters → builds ICT dataloaders with demonstration prefixes → runs inference via `test_ict()` (no training, no weight updates). When `-ict_mode learned`, it additionally loads a pre-trained `DemoAggregator` from `aggregator_best.pth` to weight demo corrections.
 
-#### 4.5 Learned Demo Aggregation (`ict_train_aggregator` mode)
+#### 3.5 Learned Demo Aggregation (`ict_train_aggregator` mode)
 
 Train a lightweight `DemoAggregator` module that learns to weight demo corrections based on query-demo feature similarity.  The base model stays **fully frozen** — only the aggregator parameters (~30K-200K) are updated.
 
