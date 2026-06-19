@@ -476,5 +476,3 @@ The `DemoAggregator` module is defined in `model/OpenCity/DemoAggregator.py` and
 ## Contact
 For any questions or feedback, feel free to contact [Zhonghang Li](mailto:bjdwh.zzh@gmail.com).
 -->
-
-```
