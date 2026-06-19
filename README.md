@@ -38,10 +38,21 @@ ICL-Traffic addresses this by **retrieving similar examples and correcting predi
 <img width="766" height="230" alt="image" src="https://github.com/user-attachments/assets/42e2ee19-9378-4105-8043-4709412ea990" />
 
 ---
+## Key Contributions
+
+- 🚦 **Gradient-free adaptation:** Enables effective traffic forecasting without updating model weights during inference.
+- 🧊 **Frozen backbone:** Requires no fine-tuning of the pretrained spatio-temporal foundation model.
+- 🔍 **Addresses input-space ICL limitations:** Traditional input-space ICL degrades performance by **9–28%** due to out-of-distribution attention patterns and sequence length mismatches.
+- 🎯 **Output-space adaptation:** Demonstrates that **demonstration retrieval** combined with **learned output-space aggregation** is both necessary and sufficient for strong gradient-free adaptation.
+- 🌍 **Robust out-of-distribution generalization:** Recovers **78–84%** of the MAE improvements achieved by gradient-based prediction-head fine-tuning on unseen cities by correcting structured systematic biases.
+- ⚡ **Parameter efficient:** Achieves these gains using only **0.8% additional parameters** and **zero test-time gradient updates**.
+
+--- 
 
 ## 🧠 Key Insight
 
 > Retrieval finds relevant examples, and aggregation selects useful corrections — enabling strong adaptation without modifying the model.
+> Our results reveal the existence of a **Representation Adaptation Gap**—the remaining ~20% performance difference between output-space correction and gradient-based adaptation. This gap highlights the point where post-hoc output corrections are no longer sufficient and **representation-level parameter adaptation** becomes necessary.
 
 ---
 
@@ -472,7 +483,22 @@ The `DemoAggregator` module is defined in `model/OpenCity/DemoAggregator.py` and
 | `ict` | In-context inference with demonstration prefixes | None | Zero-shot ICT evaluation (residual or learned) |
 | `ict_train_aggregator` | Train learned demo aggregator | DemoAggregator only (~30K-200K params) | Train aggregator for learned ICT mode |
 
+## Conclusion
+
+We present **ICL-Traffic**, a lightweight, **gradient-free in-context learning (ICL)** framework for traffic prediction built on pretrained spatio-temporal foundation models while keeping the backbone **completely frozen**.
+
+### Future Directions
+
+Potential avenues for future research include:
+
+- Hybrid two-stage adaptation pipelines combining output-space correction with lightweight representation adaptation.
+- More robust embedding-space retrieval methods that remain stable under severe domain shifts and geometric anisotropy.
+- Extending the framework to other spatio-temporal foundation models and forecasting tasks.
+
+---
+
+We release our code to facilitate reproducible research and encourage further development of in-context learning for spatio-temporal foundation models.
 <!--
 ## Contact
-For any questions or feedback, feel free to contact [Zhonghang Li](mailto:bjdwh.zzh@gmail.com).
+For any questions or feedback, feel free to contact [Parth Parikh](mailto:pparikh2@ncsu.edu) or [Mrudani Hada](mailto:mhada2@ncsu.edu).
 -->
