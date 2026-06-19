@@ -56,7 +56,7 @@ ICL-Traffic addresses this by **retrieving similar examples and correcting predi
 
 ## 📄 References
 
-- See [Final Project Report](ICL_Traffic_Forecasting.pdf) and implementation details in the project repository.
+- See [Research Paper](ICL_Traffic_Forecasting.pdf) and implementation details in the repository.
 
 
 <span id='Environment'/>
