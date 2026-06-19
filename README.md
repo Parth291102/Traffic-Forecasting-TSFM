@@ -56,7 +56,7 @@ ICL-Traffic addresses this by **retrieving similar examples and correcting predi
 
 ## 📄 References
 
-- See [Final Project Report](CSC722_Final%20Project%20Report_Group2.pdf) and implementation details in the project repository.
+- See [Final Project Report](ICL_Traffic_Forecasting_Paper_Submission.pdf) and implementation details in the project repository.
 
 
 <span id='Environment'/>
@@ -477,16 +477,4 @@ The `DemoAggregator` module is defined in `model/OpenCity/DemoAggregator.py` and
 For any questions or feedback, feel free to contact [Zhonghang Li](mailto:bjdwh.zzh@gmail.com).
 -->
 
-## Citation
-
-If you find OpenCity useful in your research or applications, please kindly cite:
-
-```
-@misc{li2024opencity,
-      title={OpenCity: Open Spatio-Temporal Foundation Models for Traffic Prediction}, 
-      author={Zhonghang Li and Long Xia and Lei Shi and Yong Xu and Dawei Yin and Chao Huang},
-      year={2024},
-      eprint={2408.10269},
-      archivePrefix={arXiv}
-}
 ```
