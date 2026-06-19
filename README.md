@@ -28,7 +28,8 @@ ICL-Traffic addresses this by **retrieving similar examples and correcting predi
 
 ### 🟢 In-Distribution (PEMS07M)
 
-<img width="766" height="212" alt="image" src="https://github.com/user-attachments/assets/2758cb4d-a1eb-4f01-8a64-c9a6c92a74dc" />
+<img width="766" height="212" alt="image" src="![Uploading Screenshot 2026-06-19 at 6.11.57 PM.png…]()
+" />
 
 
 ---
